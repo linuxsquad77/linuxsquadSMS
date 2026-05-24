@@ -12,4 +12,4 @@
 
 `cd linuxsquadSMS`
 
-"python linuxsms.py`
+`python linuxsms.py`
