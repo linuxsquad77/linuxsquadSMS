@@ -6,8 +6,6 @@
   <img src="https://img.shields.io/badge/Status-Active-success?style=for-the-badge">
 </p>
 
-
-
 ## 🛠️ Kurulum
 
 `pkg update && pkg upgrade -y`
@@ -22,8 +20,6 @@
 
 `python linuxsms.py`
 
----
 # ⚠️ UYARI
 >  **Tools gerçek SMSBomber kullanmaktadır. Lütfen sadece test amaçlı kullanın!**  
 >  **Yapılan işlemlerden** **biz sorumlu değiliz.**
----
