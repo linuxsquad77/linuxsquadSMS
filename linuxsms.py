@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 import requests,os,sys,time
 from random import choice,randint
 from string import ascii_lowercase
@@ -64,7 +62,7 @@ if __name__=='__main__':
   / / / __ \\/ / / / |/_/ ___/ __ `/ / / / __ `/ __  / 
  / / / / / / /_/ />  <(__  ) /_/ / /_/ / /_/ / /_/ /  
 /_/_/_/ /_/\\__,_/_/|_/____/\\__, /\\__,_/\\__,_/\\__,_/   
-                             /_/ v3 - Agresif Mod
+                             /_/ v2 - @linuxsquad | @resk7cr
 """+S)
     print(f'{G}[i]{S} linuxsquadSMS - Egitim Amacli Pentest Araci (Yetkili Test)\n')
     try:
