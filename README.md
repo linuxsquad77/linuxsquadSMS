@@ -6,6 +6,17 @@
   <img src="https://img.shields.io/badge/Status-Active-success?style=for-the-badge">
 </p>
 
+# SmSBomber Açıklama
+**Selamlar Ben  LinuxSquad Resk7cr ile birlikte geliştirdiğimiz SMS Bomber aracını paylaşıyoruz**
+
+**Bu sadece bir araç değil, sınırları zorlayan bir proje. Sistem hâlâ geliştiriliyor ve her gün daha güçlü hâle geliyor. Şu an yalnızca +90 numaralarında çalışmaktadır**
+
+**Geri bildirimleriniz bizim için önemli**
+
+**Discord:
+liuxsquad77
+resk7cr**
+
 ## 🛠️ Kurulum
 
 `pkg update && pkg upgrade -y`
@@ -26,3 +37,4 @@
 # ⚠️ UYARI
 >  **Tools gerçek SMSBomber kullanmaktadır. Lütfen sadece test amaçlı kullanın!**  
 >  **Yapılan işlemlerden** **biz sorumlu değiliz.**
+
