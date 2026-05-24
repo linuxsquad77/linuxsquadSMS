@@ -1,10 +1,17 @@
-# linuxsquadSMS
+# 💥 LinuxSquad SMSBomber v2
+---
 
- Kurulum:
- 
- `pkg update && pkg upgrade -y`
+# ⚠️ UYARI
+>  **Tools gerçek SMSBomber kullanmaktadır. Lütfen sadece test amaçlı kullanın!**  
+>  **Yapılan işlemlerden** **biz sorumlu değiliz.**
 
- `pkg install python -y`
+---
+
+## 🛠️ Kurulum
+
+`pkg update && pkg upgrade -y`
+
+`pkg install python -y`
 
 `pip install requests`
 
