@@ -6,11 +6,7 @@
   <img src="https://img.shields.io/badge/Status-Active-success?style=for-the-badge">
 </p>
 
----
-# ⚠️ UYARI
->  **Tools gerçek SMSBomber kullanmaktadır. Lütfen sadece test amaçlı kullanın!**  
->  **Yapılan işlemlerden** **biz sorumlu değiliz.**
----
+
 
 ## 🛠️ Kurulum
 
@@ -25,3 +21,9 @@
 `cd linuxsquadSMS`
 
 `python linuxsms.py`
+
+---
+# ⚠️ UYARI
+>  **Tools gerçek SMSBomber kullanmaktadır. Lütfen sadece test amaçlı kullanın!**  
+>  **Yapılan işlemlerden** **biz sorumlu değiliz.**
+---
