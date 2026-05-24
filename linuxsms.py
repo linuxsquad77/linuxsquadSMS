@@ -64,7 +64,7 @@ if __name__=='__main__':
 /_/_/_/ /_/\\__,_/_/|_/____/\\__, /\\__,_/\\__,_/\\__,_/   
                              /_/ v2 - @linuxsquad | @resk7cr
 """+S)
-    print(f'{G}[i]{S} linuxsquadSMS - Egitim Amacli Pentest Araci (Yetkili Test)\n')
+    print(f'{G}[i]{S} linuxsquadSMS - Üyelerin yaptığı hiçbir şeyden sorumlu değiliz (New Event)\n')
     try:
         tel=input(f'{W}Hedef Numara (10 hane, 0siz): {G}')
         if len(tel)!=10 or not tel.isdigit(): print(f'{R}Hatali numara!{S}');sys.exit(1)
