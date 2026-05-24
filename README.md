@@ -14,8 +14,7 @@
 **Geri bildirimleriniz bizim için önemli**
 
 **Discord:
-liuxsquad77
-resk7cr**
+liuxsquad77 | resk7cr**
 
 ## 🛠️ Kurulum
 
