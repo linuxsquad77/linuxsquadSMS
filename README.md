@@ -1,10 +1,9 @@
 # 💥 LinuxSquad SMSBomber v2
----
 
+---
 # ⚠️ UYARI
 >  **Tools gerçek SMSBomber kullanmaktadır. Lütfen sadece test amaçlı kullanın!**  
 >  **Yapılan işlemlerden** **biz sorumlu değiliz.**
-
 ---
 
 ## 🛠️ Kurulum
