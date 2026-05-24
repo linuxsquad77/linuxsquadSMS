@@ -20,6 +20,9 @@
 
 `python linuxsms.py`
 
+<img width="1080" height="1729" alt="2079" src="https://github.com/user-attachments/assets/e0fede66-1431-4b8b-894a-1a158f673a82" />
+
+
 # ⚠️ UYARI
 >  **Tools gerçek SMSBomber kullanmaktadır. Lütfen sadece test amaçlı kullanın!**  
 >  **Yapılan işlemlerden** **biz sorumlu değiliz.**
