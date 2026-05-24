@@ -6,6 +6,11 @@
   <img src="https://img.shields.io/badge/Status-Active-success?style=for-the-badge">
 </p>
 
+# ⚠️ UYARI
+>  **Tools gerçek SMSBomber        kullanmaktadır. Lütfen sadece test amaçlı kullanın!**  
+>  **Yapılan işlemlerden** **biz sorumlu değiliz.**
+
+
 ## 🛠️ Kurulum
 
 `pkg update && pkg upgrade -y`
@@ -20,9 +25,6 @@
 
 `python linuxsms.py`
 
-# ⚠️ UYARI
->  **Tools gerçek SMSBomber kullanmaktadır. Lütfen sadece test amaçlı kullanın!**  
->  **Yapılan işlemlerden** **biz sorumlu değiliz.**
 
 # 📣SmSBomber Açıklama
 **Selamlar Ben  LinuxSquad Resk7cr ile birlikte geliştirdiğimiz SMS Bomber aracını paylaşıyoruz**
