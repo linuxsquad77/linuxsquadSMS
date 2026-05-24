@@ -4,6 +4,13 @@
 # ⚠️ UYARI
 >  **Tools gerçek SMSBomber kullanmaktadır. Lütfen sadece test amaçlı kullanın!**  
 >  **Yapılan işlemlerden** **biz sorumlu değiliz.**
+
+<p align="center">
+  <img src="https://img.shields.io/badge/Version-2.0-red?style=for-the-badge">
+  <img src="https://img.shields.io/badge/Python-2.5.x-blue?style=for-the-badge">
+  <img src="https://img.shields.io/badge/Status-Active-success?style=for-the-badge">
+</p>
+
 ---
 
 ## 🛠️ Kurulum
